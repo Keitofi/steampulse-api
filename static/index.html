@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SteamPulse</title>
+<style>
+  :root { --bg:#0f1419; --card:#1a2129; --line:#2a333d; --text:#e6edf3; --muted:#8b98a5; --accent:#66c0f4; }
+  * { box-sizing:border-box; }
+  body { margin:0; font-family:system-ui,-apple-system,"Segoe UI",sans-serif; background:var(--bg); color:var(--text); }
+  main { max-width:760px; margin:0 auto; padding:32px 16px 48px; }
+  h1 { margin:0 0 4px; font-size:28px; }
+  .sub { color:var(--muted); margin:0 0 24px; }
+  .chips { display:flex; flex-wrap:wrap; gap:8px; margin-bottom:16px; }
+  .chip { background:var(--card); border:1px solid var(--line); color:var(--text); border-radius:999px; padding:6px 12px; font-size:14px; cursor:pointer; }
+  .chip:hover { border-color:var(--accent); }
+  form { display:flex; gap:8px; }
+  input { flex:1; min-width:0; padding:12px 14px; border-radius:10px; border:1px solid var(--line); background:var(--card); color:var(--text); font-size:16px; }
+  button.go { padding:12px 18px; border:0; border-radius:10px; background:var(--accent); color:#0f1419; font-weight:600; font-size:16px; cursor:pointer; }
+  button.go:disabled { opacity:.6; cursor:wait; }
+  #chat { margin-top:24px; display:flex; flex-direction:column; gap:16px; }
+  .msg { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:14px 16px; white-space:pre-wrap; line-height:1.5; }
+  .q { border-color:var(--accent); }
+  .meta { color:var(--muted); font-size:12px; margin-top:8px; }
+  .err { border-color:#e5534b; }
+</style>
+</head>
+<body>
+<main>
+  <h1>🎮 SteamPulse</h1>
+  <p class="sub">Pregúntale lo que quieras sobre Steam: ofertas, tendencias, noticias o compara juegos.</p>
+
+  <div class="chips">
+    <button class="chip">¿Qué ofertas buenas hay?</button>
+    <button class="chip">¿Qué juegos están de moda?</button>
+    <button class="chip">Compara Palworld contra Elden Ring</button>
+    <button class="chip">¿Qué actualizaciones tuvo Counter-Strike 2?</button>
+  </div>
+
+  <form id="f">
+    <input id="q" placeholder="Escribe tu pregunta..." autocomplete="off" maxlength="500">
+    <button class="go" id="b" type="submit">Preguntar</button>
+  </form>
+
+  <div id="chat"></div>
+</main>
+<script>
+  const f = document.getElementById("f");
+  const q = document.getElementById("q");
+  const b = document.getElementById("b");
+  const chat = document.getElementById("chat");
+
+  function add(text, cls) {
+    const d = document.createElement("div");
+    d.className = "msg " + (cls || "");
+    d.textContent = text;
+    chat.prepend(d);
+    return d;
+  }
+
+  async function ask(pregunta) {
+    if (!pregunta.trim()) return;
+    b.disabled = true;
+    const wait = add("Pensando… (la primera vez puede tardar hasta 1 minuto)");
+    add(pregunta, "q");
+    try {
+      const r = await fetch("/ask", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ pregunta })
+      });
+      const data = await r.json();
+      wait.textContent = data.respuesta || data.detail || "Sin respuesta";
+      const meta = document.createElement("div");
+      meta.className = "meta";
+      const total = (data.trace || []).reduce((s, t) => s + t.ms, 0);
+      meta.textContent = `Herramienta: ${data.tool || "-"} · ${(total / 1000).toFixed(1)} s`;
+      wait.appendChild(meta);
+    } catch (e) {
+      wait.textContent = "No pude conectar con SteamPulse. Intenta de nuevo.";
+      wait.classList.add("err");
+    } finally {
+      b.disabled = false;
+      q.value = "";
+    }
+  }
+
+  f.addEventListener("submit", e => { e.preventDefault(); ask(q.value); });
+  document.querySelectorAll(".chip").forEach(c => c.addEventListener("click", () => ask(c.textContent)));
+</script>
+</body>
+</html>
