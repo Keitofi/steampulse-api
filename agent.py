@@ -14,6 +14,7 @@ from steam_tools import (
     buscar_por_genero,
     compare_games,
     get_best_deals,
+    get_game_info,
     get_steam_news,
     get_trending_games,
 )
@@ -24,6 +25,7 @@ TOOLS_PERMITIDAS = {
     "compare_games",
     "get_steam_news",
     "buscar_por_genero",
+    "info_juego",
     "none",
 }
 
@@ -33,7 +35,8 @@ TOOLS_DESCRIPCION = """
 3. compare_games — Compara dos juegos. params: {"juego1": "nombre", "juego2": "nombre"}
 4. get_steam_news — Noticias o actualizaciones de un juego. params: {"juego": "nombre"} (vacío = noticias generales de Steam)
 5. buscar_por_genero — Juegos populares de un género (terror, rpg, carreras, estrategia...). params: {"genero": "terror", "solo_ofertas": false}
-6. none — La pregunta no necesita datos de Steam. params: {}
+6. info_juego — Ficha de un juego: precio, géneros, descripción y jugadores conectados ahora. params: {"juego": "nombre"}
+7. none — La pregunta no necesita datos de Steam. params: {}
 """
 
 PALABRAS_BLOQUEADAS = ["hack", "crack", "pirate", "pirata", "cheat"]
@@ -139,6 +142,15 @@ def _juego_seguimiento(p: str) -> str | None:
     return texto if 0 < len(texto) <= 40 else None
 
 
+PATRON_INFO = re.compile(
+    r"(?:sabes (?:algo )?(?:de|del|sobre)|conoces|qu[eé] (?:es|tal es)|"
+    r"info(?:rmaci[oó]n)? (?:de|del|sobre)|h[aá]blame (?:de|del|sobre)|"
+    r"cu[eé]ntame (?:de|del|sobre)|cu[aá]nto cuesta|precio (?:de|del)|"
+    r"cu[aá]ntos jugadores tiene)\s+(?:el\s+|la\s+)?(.+)",
+    re.IGNORECASE,
+)
+
+
 def decidir_por_reglas(pregunta: str, contexto: dict | None = None) -> dict:
     """Router determinista: resuelve la mayoría de preguntas sin gastar tokens.
 
@@ -168,10 +180,18 @@ def decidir_por_reglas(pregunta: str, contexto: dict | None = None) -> dict:
         juego = _juego_de_noticias(pregunta)
         return {"tool": "get_steam_news", "params": {"juego": juego} if juego else {}}
 
+    m = PATRON_INFO.search(pregunta)
+    if m and _limpiar_nombre(m.group(1)):
+        return {"tool": "info_juego", "params": {"juego": _limpiar_nombre(m.group(1))}}
+
     if any(w in p for w in ["tendencia", "moda", "más jugado", "mas jugado", "popular", "jugadores"]):
         return {"tool": "get_trending_games", "params": {}}
 
     # Seguimientos usando la pregunta anterior
+    if previo == "info_juego" and pregunta.strip(" ¿?").lower().startswith("y "):
+        juego = _juego_seguimiento(pregunta)
+        if juego:
+            return {"tool": "info_juego", "params": {"juego": juego}}
     if previo == "get_steam_news":
         juego = _juego_seguimiento(pregunta)
         if juego:
@@ -246,6 +266,15 @@ def ejecutar_tool(decision: dict):
         juego = _resolver(params.get("juego"))
         noticias = get_steam_news(appid=juego["appid"] if juego else None)
         return {"juego": juego, "noticias": noticias}
+    if tool == "info_juego":
+        juego = _resolver(params.get("juego"))
+        if not juego:
+            return {"error": f"No encontré '{params.get('juego')}' en Steam."}
+        info = get_game_info(juego["appid"])
+        if not info:
+            return {"error": f"No pude obtener la ficha de {juego['nombre']}."}
+        info["buscado"] = params.get("juego")
+        return info
     if tool == "buscar_por_genero":
         genero = str(params.get("genero", "")).lower()
         if genero not in GENEROS:
@@ -259,14 +288,36 @@ def ejecutar_tool(decision: dict):
 def formatear_sin_llm(datos) -> str:
     """Respuesta legible cuando el LLM no está disponible."""
     if not datos:
-        return "No encontré datos para esa pregunta. Prueba con ofertas, tendencias, noticias de un juego o comparar dos juegos."
+        return ("No entendí qué buscar. Puedo ayudarte con:\n"
+                "• Ofertas: ¿Qué ofertas buenas hay?\n"
+                "• Tendencias: ¿Qué juegos están de moda?\n"
+                "• Géneros: juegos de terror, ofertas de RPG\n"
+                "• Un juego: ¿Sabes de Elden Ring?\n"
+                "• Noticias: ¿Qué actualizaciones tuvo Counter-Strike 2?\n"
+                "• Comparar: Compara Palworld contra Elden Ring")
 
     if isinstance(datos, dict) and datos.get("error"):
         return datos["error"]
 
     lineas = []
     sugerencia = None
-    if isinstance(datos, dict) and "juegos" in datos and "genero" in datos:
+    if isinstance(datos, dict) and "jugadores_ahora" in datos:
+        if datos.get("buscado") and datos["buscado"].lower() not in (datos["nombre"] or "").lower():
+            lineas.append(f"No encontré '{datos['buscado']}' tal cual; lo más parecido en Steam es:")
+        lineas.append(datos["nombre"])
+        if datos.get("descripcion"):
+            lineas.append(datos["descripcion"])
+        precio = datos["precio"]
+        if datos.get("descuento"):
+            precio += f" ({datos['descuento']}% de descuento, antes {datos['precio_original']})"
+        lineas.append(f"\n  Precio: {precio}")
+        lineas.append(f"  Géneros: {', '.join(datos['generos']) or 'N/D'}")
+        lineas.append(f"  Desarrollador: {datos['desarrollador']}")
+        lineas.append(f"  Lanzamiento: {datos['fecha_lanzamiento']}")
+        if isinstance(datos.get("jugadores_ahora"), int):
+            lineas.append(f"  Jugando ahora: {datos['jugadores_ahora']:,}")
+        sugerencia = f"¿Qué actualizaciones tuvo {datos['nombre']}?, o compáralo contra otro juego"
+    elif isinstance(datos, dict) and "juegos" in datos and "genero" in datos:
         tipo = "en oferta" if datos.get("solo_ofertas") else "más vendidos"
         if not datos["juegos"]:
             return f"No encontré juegos de {datos['genero']} {tipo} en este momento."

@@ -224,3 +224,24 @@ def buscar_por_genero(genero: str, solo_ofertas: bool = False, max_results: int 
             break
         time.sleep(0.3)
     return {"genero": nombre, "solo_ofertas": solo_ofertas, "juegos": juegos}
+
+
+def get_current_players(appid: int) -> int | None:
+    """Jugadores conectados ahora mismo a un juego."""
+    resp = requests.get(
+        "https://api.steampowered.com/ISteamUserStats/GetNumberOfCurrentPlayers/v1/",
+        params={"appid": appid},
+        timeout=TIMEOUT,
+    )
+    if not resp.ok:
+        return None
+    return resp.json().get("response", {}).get("player_count")
+
+
+def get_game_info(appid: int) -> dict | None:
+    """Ficha de un juego: detalles de la tienda + jugadores conectados ahora."""
+    detalle = get_game_details(appid)
+    if not detalle:
+        return None
+    detalle["jugadores_ahora"] = get_current_players(appid)
+    return detalle
