@@ -6,7 +6,10 @@ load_dotenv()
 
 import os
 
+from pathlib import Path
+
 from fastapi import FastAPI, HTTPException, Query
+from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 
 from agent import steampulse
@@ -35,9 +38,12 @@ def _steam(fn, *args, **kwargs):
         raise HTTPException(status_code=502, detail=f"Error consultando Steam: {type(exc).__name__}")
 
 
-@app.get("/")
+INDEX_HTML = Path(__file__).parent / "static" / "index.html"
+
+
+@app.get("/", response_class=HTMLResponse, include_in_schema=False)
 def home():
-    return {"message": "Hola, soy SteamPulse", "docs": "/docs"}
+    return INDEX_HTML.read_text(encoding="utf-8")
 
 
 @app.get("/health")
