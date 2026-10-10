@@ -11,7 +11,8 @@ import requests
 from steam_tools import (
     GENEROS,
     buscar_appid,
-    buscar_por_genero,
+    buscar_juegos,
+    buscar_precios,
     compare_games,
     get_best_deals,
     get_game_info,
@@ -25,7 +26,9 @@ TOOLS_PERMITIDAS = {
     "compare_games",
     "get_steam_news",
     "buscar_por_genero",
+    "top_juegos",
     "info_juego",
+    "precios",
     "none",
 }
 
@@ -34,9 +37,11 @@ TOOLS_DESCRIPCION = """
 2. get_best_deals — Mejores ofertas y descuentos activos. params: {}
 3. compare_games — Compara dos juegos. params: {"juego1": "nombre", "juego2": "nombre"}
 4. get_steam_news — Noticias o actualizaciones de un juego. params: {"juego": "nombre"} (vacío = noticias generales de Steam)
-5. buscar_por_genero — Juegos populares de un género (terror, rpg, carreras, estrategia...). params: {"genero": "terror", "solo_ofertas": false}
+5. buscar_por_genero — Juegos populares de un género (terror, rpg, carreras, estrategia...). params: {"genero": "terror", "solo_ofertas": false, "cantidad": 6, "por_resenas": false}
+5b. top_juegos — Los mejores / más vendidos / mejor calificados del momento. params: {"cantidad": 5, "por_resenas": false}
 6. info_juego — Ficha de un juego: precio, géneros, descripción y jugadores conectados ahora. params: {"juego": "nombre"}
-7. none — La pregunta no necesita datos de Steam. params: {}
+7. precios — Precios de un juego o de toda una saga (ej. Five Nights at Freddy's). params: {"juego": "nombre"}
+8. none — La pregunta no necesita datos de Steam. params: {}
 """
 
 PALABRAS_BLOQUEADAS = ["hack", "crack", "pirate", "pirata", "cheat"]
@@ -126,6 +131,29 @@ def _juego_de_noticias(p: str) -> str | None:
     return None
 
 
+NUMEROS = {"un": 1, "uno": 1, "dos": 2, "tres": 3, "cuatro": 4, "cinco": 5, "seis": 6,
+           "siete": 7, "ocho": 8, "nueve": 9, "diez": 10}
+
+
+def _cantidad_en(p: str, por_defecto: int) -> int:
+    m = re.search(r"\b(\d{1,2})\b", p)
+    if m:
+        return max(1, min(int(m.group(1)), 10))
+    for palabra, n in NUMEROS.items():
+        if re.search(rf"\b{palabra}\b", p.lower()):
+            return n
+    return por_defecto
+
+
+def _pide_resenas(p: str) -> bool:
+    return any(w in p for w in ["rankead", "calificad", "valorad", "reseña", "resena", "rating", "puntuad", "review", "mejor evaluad"])
+
+
+def _pide_top(p: str) -> bool:
+    return any(w in p for w in ["mejor", "top", "rankead", "ranking", "más vendid", "mas vendid",
+                                "temporada", "recomi", "calificad", "valorad", "qué juego compro", "que juego compro"])
+
+
 def _genero_en(p: str) -> str | None:
     p = p.lower()
     for clave in sorted(GENEROS, key=len, reverse=True):
@@ -145,8 +173,15 @@ def _juego_seguimiento(p: str) -> str | None:
 PATRON_INFO = re.compile(
     r"(?:sabes (?:algo )?(?:de|del|sobre)|conoces|qu[eé] (?:es|tal es)|"
     r"info(?:rmaci[oó]n)? (?:de|del|sobre)|h[aá]blame (?:de|del|sobre)|"
-    r"cu[eé]ntame (?:de|del|sobre)|cu[aá]nto cuesta|precio (?:de|del)|"
+    r"cu[eé]ntame (?:de|del|sobre)|"
     r"cu[aá]ntos jugadores tiene)\s+(?:el\s+|la\s+)?(.+)",
+    re.IGNORECASE,
+)
+
+
+PATRON_PRECIO = re.compile(
+    r"(?:en cu[aá]nto (?:est[aá]n?|sale[n]?)|cu[aá]nto (?:cuesta[n]?|vale[n]?|sale[n]?)|precios? (?:de|del))"
+    r"\s+(?:los\s+|las\s+|el\s+|la\s+)?(?:juegos?\s+(?:de\s+(?:la\s+saga\s+(?:de\s+)?)?)?)?(.+)",
     re.IGNORECASE,
 )
 
@@ -168,7 +203,13 @@ def decidir_por_reglas(pregunta: str, contexto: dict | None = None) -> dict:
     genero = _genero_en(pregunta)
     if genero:
         solo_ofertas = pide_ofertas or previo == "get_best_deals"
-        return {"tool": "buscar_por_genero", "params": {"genero": genero, "solo_ofertas": solo_ofertas}}
+        return {"tool": "buscar_por_genero", "params": {
+            "genero": genero, "solo_ofertas": solo_ofertas,
+            "cantidad": _cantidad_en(pregunta, 6), "por_resenas": _pide_resenas(p)}}
+
+    m = PATRON_PRECIO.search(pregunta)
+    if m and _limpiar_nombre(m.group(1)):
+        return {"tool": "precios", "params": {"juego": _limpiar_nombre(m.group(1))}}
 
     if pide_ofertas:
         # "¿y en oferta?" después de buscar un género → ofertas de ese género
@@ -180,12 +221,16 @@ def decidir_por_reglas(pregunta: str, contexto: dict | None = None) -> dict:
         juego = _juego_de_noticias(pregunta)
         return {"tool": "get_steam_news", "params": {"juego": juego} if juego else {}}
 
+    if _pide_top(p) and not any(w in p for w in ["jugado", "jugadores", "moda", "tendencia"]):
+        return {"tool": "top_juegos", "params": {"cantidad": _cantidad_en(pregunta, 5), "por_resenas": _pide_resenas(p)}}
+
+
     m = PATRON_INFO.search(pregunta)
     if m and _limpiar_nombre(m.group(1)):
         return {"tool": "info_juego", "params": {"juego": _limpiar_nombre(m.group(1))}}
 
-    if any(w in p for w in ["tendencia", "moda", "más jugado", "mas jugado", "popular", "jugadores"]):
-        return {"tool": "get_trending_games", "params": {}}
+    if any(w in p for w in ["tendencia", "moda", "más jugado", "mas jugado", "popular", "jugadores", "jugado"]):
+        return {"tool": "get_trending_games", "params": {"cantidad": _cantidad_en(pregunta, 10)}}
 
     # Seguimientos usando la pregunta anterior
     if previo == "info_juego" and pregunta.strip(" ¿?").lower().startswith("y "):
@@ -253,7 +298,9 @@ def ejecutar_tool(decision: dict):
     params = decision.get("params", {}) or {}
 
     if tool == "get_trending_games":
-        return get_trending_games()
+        return get_trending_games(limit=int(params.get("cantidad") or 10))
+    if tool == "top_juegos":
+        return buscar_juegos(cantidad=int(params.get("cantidad") or 5), por_resenas=bool(params.get("por_resenas")))
     if tool == "get_best_deals":
         return get_best_deals()
     if tool == "compare_games":
@@ -266,6 +313,8 @@ def ejecutar_tool(decision: dict):
         juego = _resolver(params.get("juego"))
         noticias = get_steam_news(appid=juego["appid"] if juego else None)
         return {"juego": juego, "noticias": noticias}
+    if tool == "precios":
+        return buscar_precios(str(params.get("juego", "")))
     if tool == "info_juego":
         juego = _resolver(params.get("juego"))
         if not juego:
@@ -279,7 +328,12 @@ def ejecutar_tool(decision: dict):
         genero = str(params.get("genero", "")).lower()
         if genero not in GENEROS:
             return {"error": f"No tengo el género '{genero}'. Prueba con terror, rpg, carreras, estrategia, indie, supervivencia..."}
-        return buscar_por_genero(genero, solo_ofertas=bool(params.get("solo_ofertas")))
+        return buscar_juegos(
+            genero,
+            solo_ofertas=bool(params.get("solo_ofertas")),
+            cantidad=int(params.get("cantidad") or 6),
+            por_resenas=bool(params.get("por_resenas")),
+        )
     return None
 
 
@@ -301,7 +355,17 @@ def formatear_sin_llm(datos) -> str:
 
     lineas = []
     sugerencia = None
-    if isinstance(datos, dict) and "jugadores_ahora" in datos:
+    if isinstance(datos, dict) and "resultados" in datos:
+        if not datos["resultados"]:
+            return f"No encontré juegos que coincidan con '{datos['buscado']}' en Steam."
+        lineas.append(f"Precios en Steam para '{datos['buscado']}':")
+        for j in datos["resultados"]:
+            precio = j["precio"]
+            if j.get("descuento"):
+                precio += f" ({j['descuento']}% de descuento, antes {j['precio_original']})"
+            lineas.append(f"• {j['nombre']} — {precio}")
+        sugerencia = f"¿Sabes de {datos['resultados'][0]['nombre']}?"
+    elif isinstance(datos, dict) and "jugadores_ahora" in datos:
         if datos.get("buscado") and datos["buscado"].lower() not in (datos["nombre"] or "").lower():
             lineas.append(f"No encontré '{datos['buscado']}' tal cual; lo más parecido en Steam es:")
         lineas.append(datos["nombre"])
@@ -317,21 +381,33 @@ def formatear_sin_llm(datos) -> str:
         if isinstance(datos.get("jugadores_ahora"), int):
             lineas.append(f"  Jugando ahora: {datos['jugadores_ahora']:,}")
         sugerencia = f"¿Qué actualizaciones tuvo {datos['nombre']}?, o compáralo contra otro juego"
-    elif isinstance(datos, dict) and "juegos" in datos and "genero" in datos:
-        tipo = "en oferta" if datos.get("solo_ofertas") else "más vendidos"
+    elif isinstance(datos, dict) and "juegos" in datos:
+        if datos.get("por_resenas"):
+            tipo = "mejor calificados (entre los más vendidos)"
+        elif datos.get("solo_ofertas"):
+            tipo = "en oferta"
+        else:
+            tipo = "más vendidos ahora"
+        titulo = f"Juegos de {datos['genero']} {tipo}" if datos.get("genero") else f"Juegos {tipo}"
         if not datos["juegos"]:
-            return f"No encontré juegos de {datos['genero']} {tipo} en este momento."
-        lineas.append(f"Juegos de {datos['genero']} {tipo} en Steam:")
-        for j in datos["juegos"]:
+            return f"No encontré resultados para: {titulo.lower()}."
+        lineas.append(f"{titulo} en Steam:")
+        for i, j in enumerate(datos["juegos"], 1):
             precio = j["precio"]
             if j.get("descuento"):
                 precio += f" ({j['descuento']}% de descuento, antes {j['precio_original']})"
-            lineas.append(f"• {j['nombre']} — {precio}")
-        sugerencia = "¿Y en oferta?" if not datos.get("solo_ofertas") else f"Compara {datos['juegos'][0]['nombre']} contra otro juego"
+            r = j.get("resenas")
+            calif = f" — {r['porcentaje_positivas']}% positivas ({r['total_resenas']:,} reseñas)" if r else ""
+            lineas.append(f"{i}. {j['nombre']} — {precio}{calif}")
+        if not datos.get("solo_ofertas"):
+            sugerencia = "¿Y en oferta?"
+        else:
+            sugerencia = f"¿Sabes de {datos['juegos'][0]['nombre']}?"
     elif isinstance(datos, list) and datos and "descuento" in datos[0]:
         lineas.append("Mejores ofertas en Steam ahora mismo:")
         for o in sorted(datos, key=lambda x: int(x["descuento"].rstrip("%")), reverse=True):
-            lineas.append(f"• {o['nombre']} — {o['precio_final']} ({o['descuento']} de descuento, antes {o['precio_original']})")
+            termina = f" — termina el {o['termina']}" if o.get("termina") else ""
+            lineas.append(f"• {o['nombre']} — {o['precio_final']} ({o['descuento']} de descuento, antes {o['precio_original']}){termina}")
         sugerencia = "ofertas de terror, de RPG o de carreras"
     elif isinstance(datos, list) and datos and "peak_jugadores" in datos[0]:
         lineas.append("Juegos más jugados en Steam ahora mismo:")

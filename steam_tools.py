@@ -5,10 +5,18 @@ import re
 import time
 import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 
 import requests
 
 TIMEOUT = 10
+ZONA_MX = ZoneInfo("America/Mexico_City")
+
+
+def _fecha_mx(timestamp: int | None) -> str | None:
+    if not timestamp:
+        return None
+    return datetime.fromtimestamp(timestamp, tz=ZONA_MX).strftime("%d/%m/%Y %H:%M")
 
 # Etiquetas (tags) de Steam por género. En Steam "terror" no es género sino etiqueta.
 GENEROS = {
@@ -139,6 +147,7 @@ def get_best_deals(max_results: int = 10) -> list[dict]:
                 "precio_final": f"${final:.2f}",
                 "descuento": f"{descuento}%",
                 "ahorro": f"${original - final:.2f}",
+                "termina": _fecha_mx(item.get("discount_expiration")),
             })
     return ofertas
 
@@ -197,21 +206,52 @@ def get_steam_news(appid: int | None = None, max_results: int = 5) -> list[dict]
     ]
 
 
-def buscar_por_genero(genero: str, solo_ofertas: bool = False, max_results: int = 6) -> dict:
-    """Juegos más vendidos de un género (etiqueta de Steam), opcionalmente solo en oferta."""
-    nombre, tag_id = GENEROS[genero.lower()]
-    params = {"json": 1, "tags": tag_id, "filter": "topsellers", "cc": "mx", "l": "spanish"}
+def get_review_summary(appid: int) -> dict | None:
+    """Resumen de reseñas de Steam: % positivas y total."""
+    resp = requests.get(
+        f"https://store.steampowered.com/appreviews/{appid}",
+        params={"json": 1, "language": "all", "purchase_type": "all", "num_per_page": 0},
+        timeout=TIMEOUT,
+    )
+    if not resp.ok:
+        return None
+    q = resp.json().get("query_summary", {})
+    total = q.get("total_reviews") or 0
+    if not total:
+        return None
+    return {
+        "porcentaje_positivas": round(q.get("total_positive", 0) * 100 / total),
+        "total_resenas": total,
+        "calificacion": q.get("review_score_desc"),
+    }
+
+
+def buscar_juegos(
+    genero: str | None = None,
+    solo_ofertas: bool = False,
+    cantidad: int = 6,
+    por_resenas: bool = False,
+) -> dict:
+    """Juegos más vendidos ahora (opcional: de un género, solo en oferta, o ordenados por reseñas)."""
+    params = {"json": 1, "filter": "topsellers", "cc": "mx", "l": "spanish"}
+    nombre_genero = None
+    if genero:
+        nombre_genero, tag_id = GENEROS[genero.lower()]
+        params["tags"] = tag_id
     if solo_ofertas:
         params["specials"] = 1
     resp = requests.get("https://store.steampowered.com/search/results/", params=params, timeout=TIMEOUT)
     resp.raise_for_status()
 
+    # Para ordenar por reseñas revisamos más candidatos y nos quedamos con los mejores
+    candidatos = 12 if por_resenas else cantidad
     juegos = []
     for item in resp.json().get("items", []):
         m = re.search(r"/apps/(\d+)/", item.get("logo", ""))
         if not m:
             continue
-        detalle = get_game_details(int(m.group(1)))
+        appid = int(m.group(1))
+        detalle = get_game_details(appid)
         if detalle:
             juegos.append({
                 "nombre": detalle["nombre"],
@@ -219,11 +259,27 @@ def buscar_por_genero(genero: str, solo_ofertas: bool = False, max_results: int 
                 "precio_original": detalle["precio_original"],
                 "descuento": detalle["descuento"],
                 "generos": detalle["generos"],
+                "resenas": get_review_summary(appid),
             })
-        if len(juegos) >= max_results:
+        if len(juegos) >= candidatos:
             break
-        time.sleep(0.3)
-    return {"genero": nombre, "solo_ofertas": solo_ofertas, "juegos": juegos}
+        time.sleep(0.2)
+
+    if por_resenas:
+        juegos = [j for j in juegos if j["resenas"] and j["resenas"]["total_resenas"] >= 500]
+        juegos.sort(key=lambda j: j["resenas"]["porcentaje_positivas"], reverse=True)
+
+    return {
+        "genero": nombre_genero,
+        "solo_ofertas": solo_ofertas,
+        "por_resenas": por_resenas,
+        "juegos": juegos[:cantidad],
+    }
+
+
+def buscar_por_genero(genero: str, solo_ofertas: bool = False, max_results: int = 6) -> dict:
+    """Compatibilidad: juegos más vendidos de un género."""
+    return buscar_juegos(genero, solo_ofertas, max_results)
 
 
 def get_current_players(appid: int) -> int | None:
@@ -245,3 +301,27 @@ def get_game_info(appid: int) -> dict | None:
         return None
     detalle["jugadores_ahora"] = get_current_players(appid)
     return detalle
+
+
+def buscar_precios(nombre: str, max_results: int = 8) -> dict:
+    """Precios de los juegos que coinciden con un nombre o saga (ej. Five Nights at Freddy's)."""
+    resp = requests.get(
+        "https://store.steampowered.com/api/storesearch/",
+        params={"term": nombre, "l": "spanish", "cc": "mx"},
+        timeout=TIMEOUT,
+    )
+    resp.raise_for_status()
+    juegos = []
+    for item in resp.json().get("items", [])[:max_results]:
+        precio = item.get("price")
+        if precio:
+            final, inicial = precio.get("final", 0) / 100, precio.get("initial", 0) / 100
+            juegos.append({
+                "nombre": item.get("name"),
+                "precio": f"${final:.2f} {precio.get('currency', '')}".strip(),
+                "precio_original": f"${inicial:.2f}" if inicial > final else None,
+                "descuento": round((1 - final / inicial) * 100) if inicial > final else 0,
+            })
+        else:
+            juegos.append({"nombre": item.get("name"), "precio": "Gratis o sin precio", "precio_original": None, "descuento": 0})
+    return {"buscado": nombre, "resultados": juegos}
