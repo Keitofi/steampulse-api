@@ -200,6 +200,13 @@ def decidir_por_reglas(pregunta: str, contexto: dict | None = None) -> dict:
     if juegos:
         return {"tool": "compare_games", "params": {"juego1": juegos[0], "juego2": juegos[1]}}
 
+    # Pregunta sobre el juego anterior: "¿es multijugador?", "¿tiene español?", "¿está en oferta?"
+    if previo == "info_juego" and params_previos.get("juego") and re.match(
+        r"^\W*(?:y\s+)?(?:es|tiene|trae|viene|se puede|puedo|est[aá]|hay|cu[aá]nt[oa]s?|sirve|corre|incluye|soporta|acepta|funciona)\b",
+        pregunta, re.IGNORECASE,
+    ):
+        return {"tool": "info_juego", "params": {"juego": params_previos["juego"], "atributo": pregunta}}
+
     genero = _genero_en(pregunta)
     if genero:
         solo_ofertas = pide_ofertas or previo == "get_best_deals"
@@ -344,6 +351,8 @@ def ejecutar_tool(decision: dict):
         if not info:
             return {"error": f"No pude obtener la ficha de {juego['nombre']}."}
         info["buscado"] = params.get("juego")
+        if params.get("atributo"):
+            info["respuesta_atributo"] = _responder_atributo(params["atributo"], info)
         return info
     if tool == "buscar_por_genero":
         genero = str(params.get("genero", "")).lower()
@@ -356,6 +365,60 @@ def ejecutar_tool(decision: dict):
             por_resenas=bool(params.get("por_resenas")),
         )
     return None
+
+
+def _tiene_categoria(info: dict, claves: list[str]) -> list[str]:
+    return [c for c in info.get("categorias", []) if any(k in c.lower() for k in claves)]
+
+
+def _responder_atributo(pregunta: str, info: dict) -> str | None:
+    """Responde preguntas de sí/no sobre un juego usando sus datos de Steam."""
+    p = pregunta.lower()
+    nombre = info["nombre"]
+
+    if any(w in p for w in ["multijugador", "multiplayer", "online", "en línea", "en linea", "amigos", "cooperativo", "co-op", "coop", "jugar con"]):
+        encontradas = _tiene_categoria(info, ["multijugador", "cooperativo", "jcj", "pvp", "co-op", "multi-player", "online"])
+        if encontradas:
+            return f"Sí, {nombre} tiene: {', '.join(encontradas)}."
+        return f"No, según Steam {nombre} es solo para un jugador."
+
+    if any(w in p for w in ["español", "espanol", "idioma", "subtítulo", "subtitulo", "doblaje", "doblado"]):
+        idiomas = info.get("idiomas") or ""
+        if "español" in idiomas.lower():
+            return f"Sí, {nombre} está en español. Idiomas: {idiomas}"
+        return f"No aparece el español en {nombre}. Idiomas: {idiomas or 'N/D'}"
+
+    if any(w in p for w in ["mando", "control", "gamepad"]):
+        encontradas = _tiene_categoria(info, ["mando"])
+        return f"Sí: {', '.join(encontradas)}." if encontradas else f"Steam no indica compatibilidad con mando para {nombre}."
+
+    if any(w in p for w in ["mac", "linux", "windows", "plataforma", "steam deck"]):
+        plataformas = ", ".join(info.get("plataformas") or []) or "N/D"
+        return f"{nombre} está disponible en: {plataformas}."
+
+    if any(w in p for w in ["oferta", "descuento", "rebaja"]):
+        if info.get("descuento"):
+            return f"Sí, {nombre} tiene {info['descuento']}% de descuento: {info['precio']} (antes {info['precio_original']})."
+        return f"No, {nombre} no está en oferta ahorita. Precio: {info['precio']}."
+
+    if any(w in p for w in ["gratis", "free", "cuesta", "precio", "vale", "cuánto", "cuanto"]):
+        if "jugador" in p or "juega" in p:
+            n = info.get("jugadores_ahora")
+            return f"Ahorita hay {n:,} personas jugando {nombre}." if isinstance(n, int) else "No pude obtener los jugadores actuales."
+        return f"{nombre} cuesta {info['precio']}."
+
+    if any(w in p for w in ["bueno", "vale la pena", "reseña", "resena", "calificaci", "opinion", "opinión", "recomend", "malo"]):
+        r = info.get("resenas")
+        if not r:
+            return f"{nombre} todavía no tiene suficientes reseñas en Steam."
+        veredicto = "muy bien valorado" if r["porcentaje_positivas"] >= 80 else "con opiniones mixtas" if r["porcentaje_positivas"] >= 60 else "mal valorado"
+        return f"{nombre} está {veredicto}: {r['porcentaje_positivas']}% de reseñas positivas de {r['total_resenas']:,} ({r['calificacion']})."
+
+    if any(w in p for w in ["jugador", "juegan", "gente", "activo"]):
+        n = info.get("jugadores_ahora")
+        return f"Ahorita hay {n:,} personas jugando {nombre}." if isinstance(n, int) else "No pude obtener los jugadores actuales."
+
+    return None  # sin respuesta específica: se muestra la ficha completa
 
 
 # ---------------- Generar respuesta ----------------
@@ -386,6 +449,9 @@ def formatear_sin_llm(datos) -> str:
                 precio += f" ({j['descuento']}% de descuento, antes {j['precio_original']})"
             lineas.append(f"• {j['nombre']} — {precio}")
         sugerencia = f"¿Sabes de {datos['resultados'][0]['nombre']}?"
+    elif isinstance(datos, dict) and datos.get("respuesta_atributo"):
+        lineas.append(datos["respuesta_atributo"])
+        sugerencia = f"¿tiene español?, ¿está en oferta?, ¿es multijugador? (sobre {datos['nombre']})"
     elif isinstance(datos, dict) and "jugadores_ahora" in datos:
         if datos.get("buscado") and datos["buscado"].lower() not in (datos["nombre"] or "").lower():
             lineas.append(f"No encontré '{datos['buscado']}' tal cual; lo más parecido en Steam es:")
@@ -401,6 +467,9 @@ def formatear_sin_llm(datos) -> str:
         lineas.append(f"  Lanzamiento: {datos['fecha_lanzamiento']}")
         if isinstance(datos.get("jugadores_ahora"), int):
             lineas.append(f"  Jugando ahora: {datos['jugadores_ahora']:,}")
+        if datos.get("resenas"):
+            r = datos["resenas"]
+            lineas.append(f"  Reseñas: {r['porcentaje_positivas']}% positivas ({r['total_resenas']:,})")
         sugerencia = f"¿Qué actualizaciones tuvo {datos['nombre']}?, o compáralo contra otro juego"
     elif isinstance(datos, dict) and "juegos" in datos:
         if datos.get("por_resenas"):

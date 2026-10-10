@@ -107,7 +107,9 @@ def get_game_details(appid: int) -> dict | None:
         "precio_original": d.get("price_overview", {}).get("initial_formatted") or None,
         "descuento": d.get("price_overview", {}).get("discount_percent", 0),
         "fecha_lanzamiento": d.get("release_date", {}).get("date", "N/A"),
-        "categorias": [c["description"] for c in d.get("categories", [])[:5]],
+        "categorias": [c["description"] for c in d.get("categories", [])],
+        "idiomas": limpiar_texto(d.get("supported_languages"), 400).replace("*", "").replace(" idiomas con localización de audio", ""),
+        "plataformas": [p for p, ok in (d.get("platforms") or {}).items() if ok],
     }
 
 
@@ -312,6 +314,7 @@ def get_game_info(appid: int) -> dict | None:
     if not detalle:
         return None
     detalle["jugadores_ahora"] = get_current_players(appid)
+    detalle["resenas"] = get_review_summary(appid)
     return detalle
 
 
