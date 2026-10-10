@@ -50,6 +50,7 @@
   const q = document.getElementById("q");
   const b = document.getElementById("b");
   const chat = document.getElementById("chat");
+  let contexto = null;  // pregunta anterior, para preguntas de seguimiento
 
   function add(text, cls) {
     const d = document.createElement("div");
@@ -69,9 +70,12 @@
       const r = await fetch("/ask", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ pregunta })
+        body: JSON.stringify({ pregunta, contexto })
       });
       const data = await r.json();
+      if (data.tool && data.tool !== "none") {
+        contexto = { pregunta, tool: data.tool, params: data.params || {} };
+      }
       wait.textContent = data.respuesta || data.detail || "Sin respuesta";
       const meta = document.createElement("div");
       meta.className = "meta";

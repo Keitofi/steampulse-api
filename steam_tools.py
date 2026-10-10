@@ -10,6 +10,32 @@ import requests
 
 TIMEOUT = 10
 
+# Etiquetas (tags) de Steam por género. En Steam "terror" no es género sino etiqueta.
+GENEROS = {
+    "terror": ("Terror", 1667), "horror": ("Terror", 1667), "miedo": ("Terror", 1667),
+    "rpg": ("RPG", 122), "rol": ("RPG", 122),
+    "acción": ("Acción", 19), "accion": ("Acción", 19),
+    "aventura": ("Aventura", 21),
+    "estrategia": ("Estrategia", 9),
+    "simulación": ("Simulación", 599), "simulacion": ("Simulación", 599), "simulador": ("Simulación", 599),
+    "carreras": ("Carreras", 699),
+    "deportes": ("Deportes", 701),
+    "indie": ("Indie", 492),
+    "casual": ("Casual", 597),
+    "puzzle": ("Puzzle", 1664), "rompecabezas": ("Puzzle", 1664),
+    "shooter": ("Shooter", 1774), "disparos": ("Shooter", 1774),
+    "fps": ("FPS", 1663),
+    "supervivencia": ("Supervivencia", 1662),
+    "mundo abierto": ("Mundo abierto", 1695),
+    "cooperativo": ("Cooperativo", 1685), "co-op": ("Cooperativo", 1685),
+    "plataformas": ("Plataformas", 1625),
+    "roguelike": ("Roguelike", 1716),
+    "sandbox": ("Sandbox", 3810),
+    "anime": ("Anime", 4085),
+    "pelea": ("Pelea", 1743), "peleas": ("Pelea", 1743),
+    "zombies": ("Zombis", 1659), "zombis": ("Zombis", 1659),
+}
+
 
 def limpiar_texto(texto: str | None, limite: int = 300) -> str:
     """Quita etiquetas HTML/BBCode y espacios extra de las noticias."""
@@ -58,6 +84,8 @@ def get_game_details(appid: int) -> dict | None:
         "descripcion": d.get("short_description", "")[:300],
         "desarrollador": (d.get("developers") or ["N/A"])[0],
         "precio": d.get("price_overview", {}).get("final_formatted", "Gratis"),
+        "precio_original": d.get("price_overview", {}).get("initial_formatted") or None,
+        "descuento": d.get("price_overview", {}).get("discount_percent", 0),
         "fecha_lanzamiento": d.get("release_date", {}).get("date", "N/A"),
         "categorias": [c["description"] for c in d.get("categories", [])[:5]],
     }
@@ -167,3 +195,32 @@ def get_steam_news(appid: int | None = None, max_results: int = 5) -> list[dict]
         }
         for item in root.findall(".//item")[:max_results]
     ]
+
+
+def buscar_por_genero(genero: str, solo_ofertas: bool = False, max_results: int = 6) -> dict:
+    """Juegos más vendidos de un género (etiqueta de Steam), opcionalmente solo en oferta."""
+    nombre, tag_id = GENEROS[genero.lower()]
+    params = {"json": 1, "tags": tag_id, "filter": "topsellers", "cc": "mx", "l": "spanish"}
+    if solo_ofertas:
+        params["specials"] = 1
+    resp = requests.get("https://store.steampowered.com/search/results/", params=params, timeout=TIMEOUT)
+    resp.raise_for_status()
+
+    juegos = []
+    for item in resp.json().get("items", []):
+        m = re.search(r"/apps/(\d+)/", item.get("logo", ""))
+        if not m:
+            continue
+        detalle = get_game_details(int(m.group(1)))
+        if detalle:
+            juegos.append({
+                "nombre": detalle["nombre"],
+                "precio": detalle["precio"],
+                "precio_original": detalle["precio_original"],
+                "descuento": detalle["descuento"],
+                "generos": detalle["generos"],
+            })
+        if len(juegos) >= max_results:
+            break
+        time.sleep(0.3)
+    return {"genero": nombre, "solo_ofertas": solo_ofertas, "juegos": juegos}

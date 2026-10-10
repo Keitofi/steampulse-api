@@ -29,6 +29,7 @@ app = FastAPI(
 
 class AskRequest(BaseModel):
     pregunta: str
+    contexto: dict | None = None  # pregunta anterior: {pregunta, tool, params}
 
 
 def _steam(fn, *args, **kwargs):
@@ -87,4 +88,4 @@ def ask(request: AskRequest):
         raise HTTPException(status_code=422, detail="La pregunta está vacía")
     if len(request.pregunta) > 500:
         raise HTTPException(status_code=422, detail="La pregunta es muy larga (máx. 500 caracteres)")
-    return steampulse(request.pregunta)
+    return steampulse(request.pregunta, request.contexto)
