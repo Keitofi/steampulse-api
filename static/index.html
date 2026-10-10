@@ -8,17 +8,18 @@
   :root { --bg:#0f1419; --card:#1a2129; --line:#2a333d; --text:#e6edf3; --muted:#8b98a5; --accent:#66c0f4; }
   * { box-sizing:border-box; }
   body { margin:0; font-family:system-ui,-apple-system,"Segoe UI",sans-serif; background:var(--bg); color:var(--text); }
-  main { max-width:760px; margin:0 auto; padding:32px 16px 48px; }
+  main { max-width:760px; margin:0 auto; padding:32px 16px 0; min-height:100vh; display:flex; flex-direction:column; }
+  #chat { flex:1; }
   h1 { margin:0 0 4px; font-size:28px; }
   .sub { color:var(--muted); margin:0 0 24px; }
   .chips { display:flex; flex-wrap:wrap; gap:8px; margin-bottom:16px; }
   .chip { background:var(--card); border:1px solid var(--line); color:var(--text); border-radius:999px; padding:6px 12px; font-size:14px; cursor:pointer; }
   .chip:hover { border-color:var(--accent); }
-  form { display:flex; gap:8px; }
+  form { display:flex; gap:8px; position:sticky; bottom:0; background:var(--bg); padding:16px 0; margin-top:16px; border-top:1px solid var(--line); }
   input { flex:1; min-width:0; padding:12px 14px; border-radius:10px; border:1px solid var(--line); background:var(--card); color:var(--text); font-size:16px; }
   button.go { padding:12px 18px; border:0; border-radius:10px; background:var(--accent); color:#0f1419; font-weight:600; font-size:16px; cursor:pointer; }
   button.go:disabled { opacity:.6; cursor:wait; }
-  #chat { margin-top:24px; display:flex; flex-direction:column; gap:16px; }
+  #chat { margin-top:8px; display:flex; flex-direction:column; gap:16px; }
   .msg { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:14px 16px; white-space:pre-wrap; line-height:1.5; }
   .q { border-color:var(--accent); align-self:flex-end; max-width:85%; }
   .meta { color:var(--muted); font-size:12px; margin-top:8px; }
@@ -37,12 +38,12 @@
     <button class="chip">¿Qué actualizaciones tuvo Counter-Strike 2?</button>
   </div>
 
+  <div id="chat"></div>
+
   <form id="f">
     <input id="q" placeholder="Escribe tu pregunta..." autocomplete="off" maxlength="500">
     <button class="go" id="b" type="submit">Preguntar</button>
   </form>
-
-  <div id="chat"></div>
 </main>
 <script>
   const f = document.getElementById("f");
@@ -77,13 +78,14 @@
       const total = (data.trace || []).reduce((s, t) => s + t.ms, 0);
       meta.textContent = `Herramienta: ${data.tool || "-"} · ${(total / 1000).toFixed(1)} s`;
       wait.appendChild(meta);
-      wait.scrollIntoView({ behavior: "smooth", block: "end" });
+      wait.scrollIntoView({ behavior: "smooth", block: "start" });
     } catch (e) {
       wait.textContent = "No pude conectar con SteamPulse. Intenta de nuevo.";
       wait.classList.add("err");
     } finally {
       b.disabled = false;
       q.value = "";
+      q.focus();
     }
   }
 
