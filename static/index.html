@@ -20,7 +20,7 @@
   button.go:disabled { opacity:.6; cursor:wait; }
   #chat { margin-top:24px; display:flex; flex-direction:column; gap:16px; }
   .msg { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:14px 16px; white-space:pre-wrap; line-height:1.5; }
-  .q { border-color:var(--accent); }
+  .q { border-color:var(--accent); align-self:flex-end; max-width:85%; }
   .meta { color:var(--muted); font-size:12px; margin-top:8px; }
   .err { border-color:#e5534b; }
 </style>
@@ -54,15 +54,16 @@
     const d = document.createElement("div");
     d.className = "msg " + (cls || "");
     d.textContent = text;
-    chat.prepend(d);
+    chat.appendChild(d);
+    d.scrollIntoView({ behavior: "smooth", block: "end" });
     return d;
   }
 
   async function ask(pregunta) {
     if (!pregunta.trim()) return;
     b.disabled = true;
-    const wait = add("Pensando… (la primera vez puede tardar hasta 1 minuto)");
     add(pregunta, "q");
+    const wait = add("Pensando… (la primera vez puede tardar hasta 1 minuto)");
     try {
       const r = await fetch("/ask", {
         method: "POST",
@@ -76,6 +77,7 @@
       const total = (data.trace || []).reduce((s, t) => s + t.ms, 0);
       meta.textContent = `Herramienta: ${data.tool || "-"} · ${(total / 1000).toFixed(1)} s`;
       wait.appendChild(meta);
+      wait.scrollIntoView({ behavior: "smooth", block: "end" });
     } catch (e) {
       wait.textContent = "No pude conectar con SteamPulse. Intenta de nuevo.";
       wait.classList.add("err");
