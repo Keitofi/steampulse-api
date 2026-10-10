@@ -1,5 +1,7 @@
 """Herramientas de SteamPulse: consultas a la API pública de Steam (sin API key)."""
 
+import html
+import re
 import time
 import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
@@ -7,6 +9,17 @@ from datetime import datetime, timezone
 import requests
 
 TIMEOUT = 10
+
+
+def limpiar_texto(texto: str | None, limite: int = 300) -> str:
+    """Quita etiquetas HTML/BBCode y espacios extra de las noticias."""
+    if not texto:
+        return ""
+    texto = html.unescape(texto)
+    texto = re.sub(r"<[^>]+>", " ", texto)
+    texto = re.sub(r"\[/?[a-zA-Z0-9_=\"' ]*\]", " ", texto)
+    texto = re.sub(r"\s+", " ", texto).strip()
+    return texto[:limite]
 
 
 def buscar_appid(nombre_juego: str) -> dict | None:
@@ -112,7 +125,7 @@ def get_steam_news(appid: int | None = None, max_results: int = 5) -> list[dict]
     if appid:
         resp = requests.get(
             "https://api.steampowered.com/ISteamNews/GetNewsForApp/v2/",
-            params={"appid": appid, "count": max_results, "maxlength": 300},
+            params={"appid": appid, "count": max_results, "maxlength": 600},
             timeout=TIMEOUT,
         )
         resp.raise_for_status()
@@ -121,7 +134,7 @@ def get_steam_news(appid: int | None = None, max_results: int = 5) -> list[dict]
             fecha = item.get("date")
             noticias.append({
                 "titulo": item.get("title"),
-                "contenido": (item.get("contents") or "")[:300],
+                "contenido": limpiar_texto(item.get("contents")),
                 "fecha": (
                     datetime.fromtimestamp(fecha, tz=timezone.utc).strftime("%Y-%m-%d")
                     if fecha else None
@@ -140,7 +153,7 @@ def get_steam_news(appid: int | None = None, max_results: int = 5) -> list[dict]
     return [
         {
             "titulo": item.findtext("title"),
-            "contenido": (item.findtext("description") or "")[:300],
+            "contenido": limpiar_texto(item.findtext("description")),
             "fecha": item.findtext("pubDate"),
             "url": item.findtext("link"),
         }
