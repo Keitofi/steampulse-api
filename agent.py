@@ -203,9 +203,10 @@ def decidir_por_reglas(pregunta: str, contexto: dict | None = None) -> dict:
     genero = _genero_en(pregunta)
     if genero:
         solo_ofertas = pide_ofertas or previo == "get_best_deals"
+        recomienda = any(w in p for w in ["recomi", "me gusta", "qué juego", "que juego", "qué juegos", "que juegos"])
         return {"tool": "buscar_por_genero", "params": {
             "genero": genero, "solo_ofertas": solo_ofertas,
-            "cantidad": _cantidad_en(pregunta, 6), "por_resenas": _pide_resenas(p)}}
+            "cantidad": _cantidad_en(pregunta, 6), "por_resenas": _pide_resenas(p) or recomienda}}
 
     m = PATRON_PRECIO.search(pregunta)
     if m and _limpiar_nombre(m.group(1)):

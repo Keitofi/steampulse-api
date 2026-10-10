@@ -42,6 +42,17 @@ GENEROS = {
     "anime": ("Anime", 4085),
     "pelea": ("Pelea", 1743), "peleas": ("Pelea", 1743),
     "zombies": ("Zombis", 1659), "zombis": ("Zombis", 1659),
+    "farmear": ("Granja", 87918), "granja": ("Granja", 87918), "farming": ("Granja", 87918),
+    "cultivar": ("Granja", 87918), "sembrar": ("Granja", 87918),
+    "construir": ("Construcción", 1643), "construcción": ("Construcción", 1643), "construccion": ("Construcción", 1643),
+    "multijugador": ("Multijugador", 3859), "multiplayer": ("Multijugador", 3859),
+    "espacio": ("Espacio", 1755), "espacial": ("Espacio", 1755),
+    "buena historia": ("Buena historia", 1742), "con historia": ("Buena historia", 1742), "narrativos": ("Buena historia", 1742),
+    "battle royale": ("Battle Royale", 176981),
+    "souls": ("Souls-like", 29482), "soulslike": ("Souls-like", 29482), "souls-like": ("Souls-like", 29482),
+    "medieval": ("Medieval", 4172),
+    "carros": ("Carreras", 699), "autos": ("Carreras", 699), "coches": ("Carreras", 699),
+    "sobrevivir": ("Supervivencia", 1662),
 }
 
 
@@ -87,6 +98,7 @@ def get_game_details(appid: int) -> dict | None:
     d = data["data"]
     return {
         "appid": appid,
+        "tipo": d.get("type"),
         "nombre": d.get("name"),
         "generos": [g["description"] for g in d.get("genres", [])],
         "descripcion": d.get("short_description", "")[:300],
@@ -111,7 +123,7 @@ def get_trending_games(limit: int = 10) -> list[dict]:
     juegos = []
     for j in ranks:
         detalle = get_game_details(j["appid"])
-        if detalle:
+        if detalle and detalle.get("tipo") in (None, "game"):
             juegos.append({
                 "rank": j["rank"],
                 "appid": j["appid"],
@@ -252,7 +264,7 @@ def buscar_juegos(
             continue
         appid = int(m.group(1))
         detalle = get_game_details(appid)
-        if detalle:
+        if detalle and detalle.get("tipo") in (None, "game"):  # fuera hardware, DLC y soundtracks
             juegos.append({
                 "nombre": detalle["nombre"],
                 "precio": detalle["precio"],
