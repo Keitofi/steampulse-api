@@ -180,7 +180,7 @@ PATRON_INFO = re.compile(
 
 
 PATRON_PRECIO = re.compile(
-    r"(?:en cu[aá]nto (?:est[aá]n?|sale[n]?)|cu[aá]nto (?:cuesta[n]?|vale[n]?|sale[n]?)|precios? (?:de|del))"
+    r"(?:en cu[aá]nto (?:est[aá]n?|sale[n]?)|cu[aá]nto (?:cuesta[n]?|vale[n]?|sale[n]?)|precios?(?: (?:de|del))?)"
     r"\s+(?:los\s+|las\s+|el\s+|la\s+)?(?:juegos?\s+(?:de\s+(?:la\s+saga\s+(?:de\s+)?)?)?)?(.+)",
     re.IGNORECASE,
 )
@@ -277,12 +277,32 @@ Si la pregunta es un seguimiento, usa la pregunta anterior para entenderla."""
         texto = call_llm(system_prompt, entrada, max_tokens=1000)
         match = re.search(r"\{.*\}", texto, re.DOTALL)
         decision = json.loads(match.group(0)) if match else {}
-        if decision.get("tool") in TOOLS_PERMITIDAS:
+        if decision.get("tool") in TOOLS_PERMITIDAS and decision["tool"] != "none":
             decision.setdefault("params", {})
             return decision, "llm"
     except Exception:
         pass
-    return decidir_por_reglas(pregunta, contexto), "reglas"
+    return _ultimo_recurso(pregunta, decidir_por_reglas(pregunta, contexto)), "reglas"
+
+
+SALUDOS = {"hola", "gracias", "buenas", "buenos dias", "buenos días", "buenas tardes", "buenas noches",
+           "ok", "va", "adios", "adiós", "que onda", "qué onda", "ayuda", "help", "si", "sí", "no"}
+
+
+def _ultimo_recurso(pregunta: str, decision: dict) -> dict:
+    """Si nada coincidió, prueba si el texto es el nombre de un juego (ej. 'five nights at freddy's')."""
+    if decision["tool"] != "none":
+        return decision
+    texto = _limpiar_nombre(pregunta)
+    if len(texto) < 4 or texto.lower() in SALUDOS or len(texto.split()) > 6:
+        return decision
+    try:
+        encontrado = buscar_appid(texto)
+    except Exception:
+        return decision
+    if encontrado and texto.lower() in (encontrado["nombre"] or "").lower():
+        return {"tool": "precios", "params": {"juego": texto}}
+    return decision
 
 
 # ---------------- Ejecutar herramienta ----------------
