@@ -82,7 +82,7 @@ def call_llm(system_prompt: str, prompt: str, max_tokens: int = 600) -> str:
             "temperature": 1,
             "max_tokens": max_tokens,
         },
-        timeout=90,
+        timeout=60,
     )
     resp.raise_for_status()
     text = _extract_text(resp.json())
@@ -93,39 +93,13 @@ def call_llm(system_prompt: str, prompt: str, max_tokens: int = 600) -> str:
 
 # ---------------- Decidir herramienta ----------------
 
-def _limpiar_nombre(nombre: str) -> str:
-    return nombre.strip(" ¿?¡!.,;:\"'")
-
-
-def _juegos_a_comparar(p: str) -> tuple[str, str] | None:
-    m = re.search(r"compar\w*\s+(?:a\s+|el\s+|entre\s+)?(.+?)\s+(?:contra|vs\.?|versus|con|y)\s+(.+)", p, re.IGNORECASE)
-    if m:
-        j1, j2 = _limpiar_nombre(m.group(1)), _limpiar_nombre(m.group(2))
-        if j1 and j2:
-            return j1, j2
-    return None
-
-
-def _juego_de_noticias(p: str) -> str | None:
-    m = re.search(r"(?:\btuvo\b|\btiene\b|\bsobre\b|\bdel\b|\bde\b|\bpara\b)\s+(?:el\s+|la\s+)?(.+)$", p, re.IGNORECASE)
-    if m:
-        nombre = _limpiar_nombre(m.group(1))
-        if nombre and nombre.lower() not in {"steam", "hoy", "la semana", "esta semana", "ahora"}:
-            return nombre
-    return None
-
-
 def decidir_por_reglas(pregunta: str) -> dict:
-    """Router determinista: resuelve la mayoría de preguntas sin gastar tokens."""
+    """Router determinista: se usa si el LLM falla o devuelve algo inválido."""
     p = pregunta.lower()
-    juegos = _juegos_a_comparar(pregunta)
-    if juegos:
-        return {"tool": "compare_games", "params": {"juego1": juegos[0], "juego2": juegos[1]}}
     if any(w in p for w in ["oferta", "descuento", "barato", "rebaja", "sale"]):
         return {"tool": "get_best_deals", "params": {}}
     if any(w in p for w in ["noticia", "actualizaci", "update", "parche", "novedad"]):
-        juego = _juego_de_noticias(pregunta)
-        return {"tool": "get_steam_news", "params": {"juego": juego} if juego else {}}
+        return {"tool": "get_steam_news", "params": {}}
     if any(w in p for w in ["tendencia", "moda", "más jugado", "mas jugado", "popular", "jugadores"]):
         return {"tool": "get_trending_games", "params": {}}
     return {"tool": "none", "params": {}}
@@ -138,7 +112,7 @@ def decidir_tool(pregunta: str) -> tuple[dict, str]:
     cuando la pregunta necesita extraer nombres de juegos o no es clara.
     """
     por_reglas = decidir_por_reglas(pregunta)
-    if por_reglas["tool"] != "none":
+    if por_reglas["tool"] in ("get_best_deals", "get_trending_games"):
         return por_reglas, "reglas"
 
     system_prompt = f"""Eres el router de SteamPulse, un agente de inteligencia gaming.
@@ -190,46 +164,11 @@ def ejecutar_tool(decision: dict):
 # ---------------- Generar respuesta ----------------
 
 def formatear_sin_llm(datos) -> str:
-    """Respuesta legible cuando el LLM no está disponible."""
     if not datos:
-        return "No encontré datos para esa pregunta. Prueba con ofertas, tendencias, noticias de un juego o comparar dos juegos."
-
-    if isinstance(datos, dict) and datos.get("error"):
-        return datos["error"]
-
-    lineas = []
-    if isinstance(datos, list) and datos and "descuento" in datos[0]:
-        lineas.append("Mejores ofertas en Steam ahora mismo:")
-        for o in sorted(datos, key=lambda x: int(x["descuento"].rstrip("%")), reverse=True):
-            lineas.append(f"• {o['nombre']} — {o['precio_final']} ({o['descuento']} de descuento, antes {o['precio_original']})")
-    elif isinstance(datos, list) and datos and "peak_jugadores" in datos[0]:
-        lineas.append("Juegos más jugados en Steam ahora mismo:")
-        for j in datos:
-            jugadores = f"{j['peak_jugadores']:,}" if isinstance(j.get("peak_jugadores"), int) else "N/D"
-            lineas.append(f"{j['rank']}. {j['nombre']} — {jugadores} jugadores — {j['precio']}")
-    elif isinstance(datos, dict) and "noticias" in datos:
-        juego = (datos.get("juego") or {}).get("nombre")
-        lineas.append(f"Noticias recientes de {juego}:" if juego else "Noticias recientes de Steam:")
-        for n in datos["noticias"]:
-            fecha = f" ({n['fecha']})" if n.get("fecha") else ""
-            lineas.append(f"• {n['titulo']}{fecha}")
-            if n.get("contenido"):
-                lineas.append(f"  {n['contenido'][:200]}…")
-    elif isinstance(datos, dict) and "juego1" in datos:
-        lineas.append("Comparación:")
-        for clave in ("juego1", "juego2"):
-            j = datos.get(clave)
-            if j:
-                lineas.append(f"\n{j['nombre']}")
-                lineas.append(f"  Precio: {j['precio']}")
-                lineas.append(f"  Géneros: {', '.join(j['generos']) or 'N/D'}")
-                lineas.append(f"  Desarrollador: {j['desarrollador']}")
-                lineas.append(f"  Lanzamiento: {j['fecha_lanzamiento']}")
-    else:
-        return json.dumps(datos, ensure_ascii=False, indent=2, default=str)
-
-    lineas.append("\n(Respuesta generada sin el LLM)")
-    return "\n".join(lineas)
+        return "No pude obtener datos en este momento."
+    return "Datos obtenidos de Steam (sin síntesis del LLM):\n" + json.dumps(
+        datos, ensure_ascii=False, indent=2, default=str
+    )
 
 
 def generar_respuesta(pregunta: str, datos) -> tuple[str, bool, str | None]:
