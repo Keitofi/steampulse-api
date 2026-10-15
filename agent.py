@@ -118,6 +118,67 @@ def _limpiar_nombre(nombre: str) -> str:
     return nombre.strip(" ¿?¡!.,;:\"'")
 
 
+# Abreviaturas que usa la gente → nombre como aparece en Steam
+ALIAS = {
+    "rdr2": "Red Dead Redemption 2", "rdr 2": "Red Dead Redemption 2", "rdr": "Red Dead Redemption",
+    "gta5": "Grand Theft Auto V", "gta 5": "Grand Theft Auto V", "gtav": "Grand Theft Auto V", "gta v": "Grand Theft Auto V",
+    "gta4": "Grand Theft Auto IV", "gta 4": "Grand Theft Auto IV", "gta iv": "Grand Theft Auto IV",
+    "gta san andreas": "Grand Theft Auto: San Andreas", "gta sa": "Grand Theft Auto: San Andreas",
+    "cs2": "Counter-Strike 2", "cs 2": "Counter-Strike 2", "csgo": "Counter-Strike 2", "cs go": "Counter-Strike 2",
+    "csgo2": "Counter-Strike 2", "csgo 2": "Counter-Strike 2", "cs go 2": "Counter-Strike 2", "cs:go": "Counter-Strike 2",
+    "cs:go 2": "Counter-Strike 2", "csg2": "Counter-Strike 2", "csg 2": "Counter-Strike 2", "csgo": "Counter-Strike 2",
+    "counter strike 2": "Counter-Strike 2", "counterstrike 2": "Counter-Strike 2", "counter strike": "Counter-Strike 2",
+    "tf2": "Team Fortress 2", "l4d2": "Left 4 Dead 2", "l4d": "Left 4 Dead",
+    "pubg": "PUBG: BATTLEGROUNDS", "fnaf": "Five Nights at Freddy's",
+    "re4": "Resident Evil 4", "re2": "Resident Evil 2", "re3": "Resident Evil 3", "re8": "Resident Evil Village",
+    "re village": "Resident Evil Village", "bg3": "Baldur's Gate 3", "baldurs gate 3": "Baldur's Gate 3",
+    "ds3": "DARK SOULS III", "dark souls 3": "DARK SOULS III", "ds2": "DARK SOULS II",
+    "sdv": "Stardew Valley", "tw3": "The Witcher 3: Wild Hunt", "witcher 3": "The Witcher 3: Wild Hunt",
+    "cp2077": "Cyberpunk 2077", "mhw": "Monster Hunter: World",
+    "mh wilds": "Monster Hunter Wilds", "mhwilds": "Monster Hunter Wilds", "ror2": "Risk of Rain 2",
+    "dbd": "Dead by Daylight", "r6": "Tom Clancy's Rainbow Six Siege", "r6s": "Tom Clancy's Rainbow Six Siege", "apex": "Apex Legends", "poe": "Path of Exile",
+    "poe2": "Path of Exile 2", "poe 2": "Path of Exile 2", "ets2": "Euro Truck Simulator 2",
+    "ats": "American Truck Simulator", "hk": "Hollow Knight", "hl2": "Half-Life 2",
+    "kcd2": "Kingdom Come: Deliverance II", "kcd": "Kingdom Come: Deliverance", "ac valhalla": "Assassin's Creed Valhalla",
+    "gow": "God of War", "rl": "Rocket League", "cod": "Call of Duty",
+    "fh5": "Forza Horizon 5", "forza 5": "Forza Horizon 5", "fh4": "Forza Horizon 4", "nms": "No Man's Sky",
+    "dst": "Don't Starve Together", "aoe2": "Age of Empires II: Definitive Edition", "aoe4": "Age of Empires IV",
+    "sekiro": "Sekiro: Shadows Die Twice", "p5r": "Persona 5 Royal", "p3r": "Persona 3 Reload",
+}
+# Ordenados de más largo a más corto para que "gta san andreas" gane sobre "gta"
+_PATRON_ALIAS = re.compile(
+    r"(?<![\w'])(" + "|".join(re.escape(a) for a in sorted(ALIAS, key=len, reverse=True)) + r")(?![\w'])",
+    re.IGNORECASE,
+)
+
+
+def expandir_alias(texto: str) -> str:
+    """'¿rdr2 está en oferta?' → '¿Red Dead Redemption 2 está en oferta?'"""
+    return _PATRON_ALIAS.sub(lambda m: ALIAS[m.group(1).lower()], texto)
+
+
+def _palabras(texto: str) -> list[str]:
+    return re.findall(r"[a-z0-9]+", texto.lower().replace("'", ""))
+
+
+def _siglas(nombre: str) -> str:
+    """'Red Dead Redemption 2' → 'rdr2' · 'Counter-Strike 2' → 'cs2'."""
+    return "".join(w if w.isdigit() else w[0] for w in _palabras(nombre))
+
+
+def _parece_el_juego(texto: str, nombre: str) -> bool:
+    """¿Lo que escribió el usuario corresponde al juego que encontró Steam?"""
+    t, n = _palabras(texto), _palabras(nombre)
+    if not t or not n:
+        return False
+    if len("".join(t)) >= 4 and all(w in n for w in t):               # "stardew" en "Stardew Valley"
+        return True
+    compacto = "".join(t)
+    if compacto in (_siglas(nombre), "".join(n)):   # "rdr2", "hollowknight"
+        return True
+    return len(t) >= 2 and sum(w in n for w in t) / len(t) >= 0.6   # pequeños errores de dedo
+
+
 def _juegos_a_comparar(p: str) -> tuple[str, str] | None:
     m = re.search(r"compar\w*\s+(?:a\s+|el\s+|entre\s+)?(.+?)\s+(?:contra|vs\.?|versus|con|y)\s+(.+)", p, re.IGNORECASE)
     if m:
@@ -252,6 +313,10 @@ def decidir_por_reglas(pregunta: str, contexto: dict | None = None) -> dict:
         return {"tool": "precios", "params": {"juego": _limpiar_nombre(m.group(1))}}
 
     if pide_ofertas:
+        # "¿Red Dead Redemption 2 está en oferta?" → revisar ese juego, no todas las ofertas
+        m = re.match(r"^\W*(?:el\s+|la\s+)?(.+?)\s+(?:est[aá]n?|tiene)\s+(?:en\s+)?(?:oferta|descuento|rebaja)", pregunta, re.IGNORECASE)
+        if m and _limpiar_nombre(m.group(1)) and _limpiar_nombre(m.group(1)).lower() not in {"que", "qué", "cuál", "cual", "algo", "qué juego", "que juego"}:
+            return {"tool": "info_juego", "params": {"juego": _limpiar_nombre(m.group(1)), "atributo": pregunta}}
         # "¿y en oferta?" después de buscar un género → ofertas de ese género
         if previo == "buscar_por_genero" and params_previos.get("genero"):
             return {"tool": "buscar_por_genero", "params": {"genero": params_previos["genero"], "solo_ofertas": True}}
@@ -300,6 +365,11 @@ def decidir_tool(pregunta: str, contexto: dict | None = None) -> tuple[dict, str
     if por_reglas["tool"] != "none":
         return por_reglas, "reglas"
 
+    # Antes de gastar el LLM: ¿escribió solo el nombre de un juego? ("rdr2", "hollow knight")
+    como_juego = _ultimo_recurso(pregunta, por_reglas)
+    if como_juego["tool"] != "none":
+        return como_juego, "reglas"
+
     system_prompt = f"""Eres el router de SteamPulse, un agente de inteligencia gaming.
 Herramientas disponibles:
 {TOOLS_DESCRIPCION}
@@ -322,7 +392,7 @@ Si la pregunta es un seguimiento, usa la pregunta anterior para entenderla."""
             return decision, "llm"
     except Exception:
         pass
-    return _ultimo_recurso(pregunta, decidir_por_reglas(pregunta, contexto)), "reglas"
+    return por_reglas, "reglas"
 
 
 SALUDOS = {"hola", "gracias", "buenas", "buenos dias", "buenos días", "buenas tardes", "buenas noches",
@@ -330,18 +400,18 @@ SALUDOS = {"hola", "gracias", "buenas", "buenos dias", "buenos días", "buenas t
 
 
 def _ultimo_recurso(pregunta: str, decision: dict) -> dict:
-    """Si nada coincidió, prueba si el texto es el nombre de un juego (ej. 'five nights at freddy's')."""
+    """Si nada coincidió, prueba si el texto es el nombre de un juego y muestra su ficha."""
     if decision["tool"] != "none":
         return decision
     texto = _limpiar_nombre(pregunta)
-    if len(texto) < 4 or texto.lower() in SALUDOS or len(texto.split()) > 6:
+    if len(texto) < 2 or texto.lower() in SALUDOS or len(texto.split()) > 6:
         return decision
     try:
         encontrado = buscar_appid(texto)
     except Exception:
         return decision
-    if encontrado and texto.lower() in (encontrado["nombre"] or "").lower():
-        return {"tool": "precios", "params": {"juego": texto}}
+    if encontrado and _parece_el_juego(texto, encontrado["nombre"] or ""):
+        return {"tool": "info_juego", "params": {"juego": encontrado["nombre"]}}
     return decision
 
 
@@ -639,9 +709,9 @@ def steampulse(pregunta: str, contexto: dict | None = None) -> dict:
             "trace": [{"paso": "moderacion", "ms": 0}],
         }
 
-    # 2. Decidir herramienta
+    # 2. Decidir herramienta (primero se traducen abreviaturas: rdr2, gta5, cs2…)
     t = time.perf_counter()
-    decision, origen = decidir_tool(pregunta, contexto)
+    decision, origen = decidir_tool(expandir_alias(pregunta), contexto)
     paso(f"router:{origen}:{decision['tool']}", t)
 
     # 3. Ejecutar herramienta
