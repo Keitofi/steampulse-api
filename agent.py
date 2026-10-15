@@ -1,5 +1,6 @@
 """Agente SteamPulse: decide la herramienta, ejecuta y sintetiza con el LLM del curso."""
 
+import difflib
 import json
 import os
 import re
@@ -171,12 +172,18 @@ def _parece_el_juego(texto: str, nombre: str) -> bool:
     t, n = _palabras(texto), _palabras(nombre)
     if not t or not n:
         return False
-    if len("".join(t)) >= 4 and all(w in n for w in t):               # "stardew" en "Stardew Valley"
-        return True
     compacto = "".join(t)
     if compacto in (_siglas(nombre), "".join(n)):   # "rdr2", "hollowknight"
         return True
-    return len(t) >= 2 and sum(w in n for w in t) / len(t) >= 0.6   # pequeños errores de dedo
+
+    def coincide(w: str) -> bool:
+        # exacta, o con un error de dedo ("mith" ≈ "myth") en palabras de 4+ letras
+        return w in n or (len(w) >= 4 and bool(difflib.get_close_matches(w, n, n=1, cutoff=0.75)))
+
+    aciertos = sum(coincide(w) for w in t)
+    if len(compacto) >= 4 and aciertos == len(t):   # "stardew" en "Stardew Valley"
+        return True
+    return len(t) >= 2 and aciertos / len(t) >= 0.6
 
 
 def _juegos_a_comparar(p: str) -> tuple[str, str] | None:
@@ -407,7 +414,7 @@ def _ultimo_recurso(pregunta: str, decision: dict) -> dict:
     if len(texto) < 2 or texto.lower() in SALUDOS or len(texto.split()) > 6:
         return decision
     try:
-        encontrado = buscar_appid(texto)
+        encontrado = buscar_tolerante(texto)
     except Exception:
         return decision
     if encontrado and _parece_el_juego(texto, encontrado["nombre"] or ""):
@@ -417,10 +424,32 @@ def _ultimo_recurso(pregunta: str, decision: dict) -> dict:
 
 # ---------------- Ejecutar herramienta ----------------
 
+def buscar_tolerante(nombre: str) -> dict | None:
+    """Busca en Steam aguantando errores de dedo.
+
+    La búsqueda de Steam es muy literal: "Black mith wukong" no regresa nada.
+    Si no hay resultado, se vuelve a buscar quitando una palabra a la vez
+    ("black wukong", "mith wukong"…) y se acepta solo si el juego encontrado
+    se parece a lo que escribió el usuario.
+    """
+    encontrado = buscar_appid(nombre)
+    if encontrado:
+        return encontrado
+    palabras = [w for w in re.split(r"[\s:\-]+", nombre) if w]
+    if len(palabras) < 2:
+        return None
+    for i in sorted(range(len(palabras)), key=lambda k: len(palabras[k]))[:4]:   # primero quita las más cortas
+        intento = " ".join(palabras[:i] + palabras[i + 1:])
+        encontrado = buscar_appid(intento)
+        if encontrado and _parece_el_juego(nombre, encontrado["nombre"] or ""):
+            return encontrado
+    return None
+
+
 def _resolver(nombre: str | None) -> dict | None:
     if not nombre:
         return None
-    return buscar_appid(nombre)
+    return buscar_tolerante(nombre)
 
 
 def ejecutar_tool(decision: dict):
