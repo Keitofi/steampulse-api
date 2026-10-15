@@ -125,7 +125,9 @@ ALIAS = {
     "rdr2": "Red Dead Redemption 2", "rdr 2": "Red Dead Redemption 2", "rdr": "Red Dead Redemption",
     "gta5": "Grand Theft Auto V", "gta 5": "Grand Theft Auto V", "gtav": "Grand Theft Auto V", "gta v": "Grand Theft Auto V",
     "gta4": "Grand Theft Auto IV", "gta 4": "Grand Theft Auto IV", "gta iv": "Grand Theft Auto IV",
-    "gta san andreas": "Grand Theft Auto: San Andreas", "gta sa": "Grand Theft Auto: San Andreas",
+    "gta": "Grand Theft Auto V", "gta online": "Grand Theft Auto V", "gta 6": "Grand Theft Auto VI", "gta vi": "Grand Theft Auto VI",
+    "kcd 2": "Kingdom Come: Deliverance II", "gta 3": "Grand Theft Auto III", "gta iii": "Grand Theft Auto III",
+    "gta vice city": "Grand Theft Auto: Vice City", "gta vc": "Grand Theft Auto: Vice City", "gta san andreas": "Grand Theft Auto: San Andreas", "gta sa": "Grand Theft Auto: San Andreas",
     "cs2": "Counter-Strike 2", "cs 2": "Counter-Strike 2", "csgo": "Counter-Strike 2", "cs go": "Counter-Strike 2",
     "csgo2": "Counter-Strike 2", "csgo 2": "Counter-Strike 2", "cs go 2": "Counter-Strike 2", "cs:go": "Counter-Strike 2",
     "cs:go 2": "Counter-Strike 2", "csg2": "Counter-Strike 2", "csg 2": "Counter-Strike 2", "csgo": "Counter-Strike 2",
@@ -149,7 +151,7 @@ ALIAS = {
 }
 # Ordenados de más largo a más corto para que "gta san andreas" gane sobre "gta"
 _PATRON_ALIAS = re.compile(
-    r"(?<![\w'])(" + "|".join(re.escape(a) for a in sorted(ALIAS, key=len, reverse=True)) + r")(?![\w'])",
+    r"(?<![\w'])(" + "|".join(re.escape(a) for a in sorted(ALIAS, key=len, reverse=True)) + r")(?![\w'])(?!\s*(?:\d|[ivx]+\b))",
     re.IGNORECASE,
 )
 
@@ -774,7 +776,11 @@ def formatear_sin_llm(datos) -> str:
         sugerencia = f"¿Qué actualizaciones tuvo {datos[0]['nombre']}?, o juegos de un género (terror, RPG...)"
     elif isinstance(datos, dict) and "noticias" in datos:
         juego = (datos.get("juego") or {}).get("nombre")
-        lineas.append(f"Noticias recientes de {juego}:" if juego else "Noticias recientes de Steam:")
+        if not datos["noticias"]:
+            lineas.append(f"{juego} no tiene anuncios oficiales recientes en Steam." if juego
+                          else "No pude obtener noticias de Steam en este momento.")
+        else:
+            lineas.append(f"Noticias recientes de {juego}:" if juego else "Noticias recientes de Steam:")
         for n in datos["noticias"]:
             fecha = f" ({n['fecha']})" if n.get("fecha") else ""
             lineas.append(f"• {n['titulo']}{fecha}")
