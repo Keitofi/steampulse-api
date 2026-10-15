@@ -1,6 +1,7 @@
 """Herramientas de SteamPulse: consultas a la API pública de Steam (sin API key)."""
 
 import html
+import json
 import re
 import time
 import xml.etree.ElementTree as ET
@@ -245,6 +246,8 @@ def buscar_juegos(
     solo_ofertas: bool = False,
     cantidad: int = 6,
     por_resenas: bool = False,
+    tag_ids: list[int] | None = None,
+    excluir_appid: int | None = None,
 ) -> dict:
     """Juegos más vendidos ahora (opcional: de un género, solo en oferta, o ordenados por reseñas)."""
     params = {"json": 1, "filter": "topsellers", "cc": "mx", "l": "spanish"}
@@ -252,6 +255,8 @@ def buscar_juegos(
     if genero:
         nombre_genero, tag_id = GENEROS[genero.lower()]
         params["tags"] = tag_id
+    if tag_ids:
+        params["tags"] = ",".join(str(t) for t in tag_ids)
     if solo_ofertas:
         params["specials"] = 1
     resp = requests.get("https://store.steampowered.com/search/results/", params=params, timeout=TIMEOUT)
@@ -265,6 +270,8 @@ def buscar_juegos(
         if not m:
             continue
         appid = int(m.group(1))
+        if appid == excluir_appid:
+            continue
         detalle = get_game_details(appid)
         if detalle and detalle.get("tipo") in (None, "game"):  # fuera hardware, DLC y soundtracks
             juegos.append({
@@ -340,3 +347,77 @@ def buscar_precios(nombre: str, max_results: int = 8) -> dict:
         else:
             juegos.append({"nombre": item.get("name"), "precio": "Gratis o sin precio", "precio_original": None, "descuento": 0})
     return {"buscado": nombre, "resultados": juegos}
+
+
+# Etiquetas demasiado generales para buscar juegos parecidos
+TAGS_GENERICOS = {
+    "Singleplayer", "Multiplayer", "Indie", "Casual", "Early Access", "Free to Play", "3D", "2D",
+    "First-Person", "Third Person", "Funny", "Great Soundtrack", "Atmospheric", "Colorful", "Cute",
+    "Realistic", "Family Friendly", "Stylized", "Comedy", "Physics", "Online Co-Op", "PvP", "PvE",
+    "Controller", "Steam Achievements", "Steam Trading Cards", "Full controller support", "Beautiful",
+    "Relaxing", "Fantasy", "Difficult", "Story Rich", "Adventure", "Action", "Simulation",
+}
+
+# Géneros de la tienda (en español) → etiqueta de Steam, por si no se pueden leer las etiquetas
+GENERO_A_TAG = {
+    "Simuladores": 599, "Acción": 19, "Aventura": 21, "Rol": 122, "Estrategia": 9,
+    "Carreras": 699, "Deportes": 701, "Casual": 597, "Indie": 492,
+}
+
+
+TAGS_ES = {
+    "Management": "Gestión", "Building": "Construcción", "Simulation": "Simulación", "Strategy": "Estrategia",
+    "Open World": "Mundo abierto", "Survival": "Supervivencia", "Horror": "Terror", "Survival Horror": "Survival horror",
+    "Farming Sim": "Granja", "Platformer": "Plataformas", "Racing": "Carreras", "Sports": "Deportes",
+    "Co-op": "Cooperativo", "Base Building": "Construcción de bases", "Crafting": "Fabricación",
+    "City Builder": "Construcción de ciudades", "Life Sim": "Simulación de vida", "Exploration": "Exploración",
+    "Pixel Graphics": "Pixel art", "Turn-Based": "Por turnos", "Tactical": "Táctico", "Card Game": "Cartas",
+    "Sci-fi": "Ciencia ficción", "Space": "Espacio", "Zombies": "Zombis", "Psychological Horror": "Terror psicológico",
+    "Economy": "Economía", "Automation": "Automatización", "Colony Sim": "Colonias", "Hack and Slash": "Hack and slash",
+    "Fighting": "Pelea", "Mystery": "Misterio", "Detective": "Detective", "Medieval": "Medieval",
+}
+
+
+def get_store_tags(appid: int, maximo: int = 3) -> list[dict]:
+    """Etiquetas que la comunidad le puso al juego (ej. Management, Building, Sandbox)."""
+    resp = requests.get(
+        f"https://store.steampowered.com/app/{appid}/",
+        params={"l": "english"},
+        cookies={"birthtime": "0", "lastagecheckage": "1-0-1990", "wants_mature_content": "1"},
+        timeout=TIMEOUT,
+    )
+    if not resp.ok:
+        return []
+    m = re.search(r"InitAppTagModal\(\s*\d+,\s*(\[.*?\])\s*,", resp.text, re.DOTALL)
+    if not m:
+        return []
+    try:
+        tags = json.loads(m.group(1))
+    except ValueError:
+        return []
+    utiles = [t for t in tags if t.get("name") not in TAGS_GENERICOS and t.get("tagid")]
+    return [{"id": int(t["tagid"]), "nombre": TAGS_ES.get(t["name"], t["name"])} for t in utiles[:maximo]]
+
+
+def juegos_similares(appid: int, cantidad: int = 6) -> dict:
+    """Juegos parecidos: mismas etiquetas principales, ordenados por reseñas."""
+    base = get_game_details(appid)
+    tags = get_store_tags(appid)
+    if not tags and base:
+        especificos = [g for g in base["generos"] if g in GENERO_A_TAG and g not in ("Indie", "Casual")]
+        tags = [{"id": GENERO_A_TAG[g], "nombre": g} for g in (especificos or base["generos"]) if g in GENERO_A_TAG][:2]
+
+    resultado = {"juegos": []}
+    # Si con 3 etiquetas hay pocos resultados, se relaja a 2 y luego a 1
+    for n in range(len(tags), 0, -1):
+        resultado = buscar_juegos(
+            cantidad=cantidad,
+            por_resenas=True,
+            tag_ids=[t["id"] for t in tags[:n]],
+            excluir_appid=appid,
+        )
+        if len(resultado["juegos"]) >= 3:
+            break
+    resultado["parecidos_a"] = base["nombre"] if base else None
+    resultado["etiquetas"] = [t["nombre"] for t in tags]
+    return resultado

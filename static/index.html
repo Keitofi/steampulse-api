@@ -80,7 +80,8 @@
       const meta = document.createElement("div");
       meta.className = "meta";
       const total = (data.trace || []).reduce((s, t) => s + t.ms, 0);
-      meta.textContent = `Herramienta: ${data.tool || "-"} · ${(total / 1000).toFixed(1)} s`;
+      const llm = data.limites ? ` · LLM: ${data.limites.llamadas_llm} llamada(s)` : "";
+      meta.textContent = data.tool ? `Herramienta: ${data.tool} · ${(total / 1000).toFixed(1)} s${llm}` : "";
       wait.appendChild(meta);
       wait.scrollIntoView({ behavior: "smooth", block: "start" });
     } catch (e) {

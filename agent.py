@@ -8,6 +8,7 @@ import uuid
 
 import requests
 
+from limits import LLAMADAS_LLM, TIEMPO_MAX_PARA_LLM, PresupuestoAgotado, consumir_llamada_llm, estado_llm
 from steam_tools import (
     GENEROS,
     buscar_appid,
@@ -16,6 +17,7 @@ from steam_tools import (
     compare_games,
     get_best_deals,
     get_game_info,
+    juegos_similares,
     get_steam_news,
     get_trending_games,
 )
@@ -29,6 +31,7 @@ TOOLS_PERMITIDAS = {
     "top_juegos",
     "info_juego",
     "precios",
+    "similares",
     "none",
 }
 
@@ -41,7 +44,8 @@ TOOLS_DESCRIPCION = """
 5b. top_juegos — Los mejores / más vendidos / mejor calificados del momento. params: {"cantidad": 5, "por_resenas": false}
 6. info_juego — Ficha de un juego: precio, géneros, descripción y jugadores conectados ahora. params: {"juego": "nombre"}
 7. precios — Precios de un juego o de toda una saga (ej. Five Nights at Freddy's). params: {"juego": "nombre"}
-8. none — La pregunta no necesita datos de Steam. params: {}
+8. similares — Juegos parecidos a uno que le gustó al usuario. params: {"juego": "nombre"}
+9. none — La pregunta no necesita datos de Steam. params: {}
 """
 
 PALABRAS_BLOQUEADAS = ["hack", "crack", "pirate", "pirata", "cheat"]
@@ -95,6 +99,7 @@ def call_llm(system_prompt: str, prompt: str, max_tokens: int = 600) -> str:
 
     # Un reintento si el backend falla con error 5xx (suele ser transitorio)
     for intento in range(2):
+        consumir_llamada_llm()  # cada intento cuenta contra el presupuesto diario
         resp = requests.post(f"{base_url}/v1/completions", headers=headers, json=payload, timeout=90)
         if resp.status_code < 500 or intento == 1:
             break
@@ -186,6 +191,24 @@ PATRON_PRECIO = re.compile(
 )
 
 
+PATRON_SIMILARES = [
+    re.compile(r"(?:parecid[oa]s?|similares?)\s+(?:a|al)\s+(?:el\s+|la\s+)?(.+?)(?=[,.?¿!]|$)", re.IGNORECASE),
+    re.compile(r"juegos?\s+(?:como|tipo|estilo)\s+(?:el\s+|la\s+)?(.+?)(?=[,.?¿!]|$)", re.IGNORECASE),
+    re.compile(r"me\s+(?:gust[óo]|encant[óo]|gusta|encanta)\s+(?:mucho\s+)?(?:el\s+|la\s+|jugar\s+)?(.+?)(?=[,.?¿!]|\s+(?:qu[eé]|y|pero|cu[aá]les?|algo|otros?)\b|$)", re.IGNORECASE),
+]
+PIDE_SIMILARES = ["parecid", "similar", "otros juegos", "qué más", "que mas", "qué otros", "que otros", "algo así", "algo asi", "me pueden gustar", "me puede gustar"]
+
+
+def _juego_para_similares(pregunta: str) -> str | None:
+    for patron in PATRON_SIMILARES:
+        m = patron.search(pregunta)
+        if m:
+            nombre = _limpiar_nombre(m.group(1))
+            if nombre and not _genero_en(nombre) and len(nombre.split()) <= 6:
+                return nombre
+    return None
+
+
 def decidir_por_reglas(pregunta: str, contexto: dict | None = None) -> dict:
     """Router determinista: resuelve la mayoría de preguntas sin gastar tokens.
 
@@ -199,6 +222,15 @@ def decidir_por_reglas(pregunta: str, contexto: dict | None = None) -> dict:
     juegos = _juegos_a_comparar(pregunta)
     if juegos:
         return {"tool": "compare_games", "params": {"juego1": juegos[0], "juego2": juegos[1]}}
+
+    # "Me gustó X, ¿qué otros juegos me pueden gustar?" / "juegos parecidos a X"
+    if (any(w in p for w in PIDE_SIMILARES) or "me gust" in p or "me encant" in p
+            or re.search(r"juegos?\s+(?:como|tipo|estilo)\s", p)):
+        juego = _juego_para_similares(pregunta)
+        if not juego and previo == "info_juego" and any(w in p for w in PIDE_SIMILARES):
+            juego = params_previos.get("juego")
+        if juego:
+            return {"tool": "similares", "params": {"juego": juego}}
 
     # Pregunta sobre el juego anterior: "¿es multijugador?", "¿tiene español?", "¿está en oferta?"
     if previo == "info_juego" and params_previos.get("juego") and re.match(
@@ -341,6 +373,11 @@ def ejecutar_tool(decision: dict):
         juego = _resolver(params.get("juego"))
         noticias = get_steam_news(appid=juego["appid"] if juego else None)
         return {"juego": juego, "noticias": noticias}
+    if tool == "similares":
+        juego = _resolver(params.get("juego"))
+        if not juego:
+            return {"error": f"No encontré '{params.get('juego')}' en Steam para buscar parecidos."}
+        return juegos_similares(juego["appid"])
     if tool == "precios":
         return buscar_precios(str(params.get("juego", "")))
     if tool == "info_juego":
@@ -471,6 +508,19 @@ def formatear_sin_llm(datos) -> str:
             r = datos["resenas"]
             lineas.append(f"  Reseñas: {r['porcentaje_positivas']}% positivas ({r['total_resenas']:,})")
         sugerencia = f"¿Qué actualizaciones tuvo {datos['nombre']}?, o compáralo contra otro juego"
+    elif isinstance(datos, dict) and "parecidos_a" in datos:
+        if not datos["juegos"]:
+            return f"No encontré juegos parecidos a {datos['parecidos_a']} en este momento."
+        etiquetas = f" (comparten: {', '.join(datos['etiquetas'])})" if datos.get("etiquetas") else ""
+        lineas.append(f"Si te gustó {datos['parecidos_a']}, te pueden gustar{etiquetas}:")
+        for i, j in enumerate(datos["juegos"], 1):
+            precio = j["precio"]
+            if j.get("descuento"):
+                precio += f" ({j['descuento']}% de descuento)"
+            r = j.get("resenas")
+            calif = f" — {r['porcentaje_positivas']}% positivas" if r else ""
+            lineas.append(f"{i}. {j['nombre']} — {precio}{calif}")
+        sugerencia = f"¿Sabes de {datos['juegos'][0]['nombre']}?"
     elif isinstance(datos, dict) and "juegos" in datos:
         if datos.get("por_resenas"):
             tipo = "mejor calificados (entre los más vendidos)"
@@ -557,6 +607,8 @@ Al final sugiere en una línea qué más puede preguntar (ofertas, géneros, not
     )
     try:
         return call_llm(system_prompt, prompt, max_tokens=2000), True, None
+    except PresupuestoAgotado as exc:
+        return formatear_sin_llm(datos), False, str(exc)
     except requests.HTTPError as exc:
         detalle = exc.response.text[:300] if exc.response is not None else ""
         return formatear_sin_llm(datos), False, f"HTTP {exc.response.status_code}: {detalle}"
@@ -569,6 +621,9 @@ Al final sugiere en una línea qué más puede preguntar (ofertas, géneros, not
 def steampulse(pregunta: str, contexto: dict | None = None) -> dict:
     request_id = str(uuid.uuid4())[:8]
     trace = []
+    inicio_total = time.perf_counter()
+    contador_llm = [0]
+    LLAMADAS_LLM.set(contador_llm)
 
     def paso(nombre, inicio):
         trace.append({"paso": nombre, "ms": round((time.perf_counter() - inicio) * 1000)})
@@ -603,6 +658,10 @@ def steampulse(pregunta: str, contexto: dict | None = None) -> dict:
     error_llm = None
     if error:
         respuesta, llm_usado = "Steam no respondió en este momento. Intenta de nuevo en unos minutos.", False
+    elif time.perf_counter() - inicio_total > TIEMPO_MAX_PARA_LLM:
+        # Límite de tiempo total: si ya tardamos mucho, no esperamos además al LLM
+        respuesta, llm_usado = formatear_sin_llm(datos), False
+        error_llm = f"Se omitió el LLM: la pregunta ya llevaba más de {TIEMPO_MAX_PARA_LLM:.0f} s"
     else:
         respuesta, llm_usado, error_llm = generar_respuesta(pregunta, datos, contexto)
     paso("llm" if llm_usado else "fallback_sin_llm", t)
@@ -620,4 +679,9 @@ def steampulse(pregunta: str, contexto: dict | None = None) -> dict:
         "respuesta": respuesta,
         "datos": datos,
         "trace": trace,
+        "limites": {
+            "llamadas_llm": contador_llm[0],
+            "tiempo_total_ms": round((time.perf_counter() - inicio_total) * 1000),
+            "llm_restantes_hoy": estado_llm()["restantes_hoy"],
+        },
     }
