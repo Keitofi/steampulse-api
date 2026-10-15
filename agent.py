@@ -198,12 +198,26 @@ def _juegos_a_comparar(p: str) -> tuple[str, str] | None:
     return None
 
 
+RELLENO_NOTICIAS = {
+    "qué", "que", "cuáles", "cuales", "hay", "ay", "noticias", "noticia", "nuevas", "nuevo", "nuevos", "recientes",
+    "últimas", "ultimas", "actualizaciones", "actualización", "actualizacion", "updates", "update", "novedades",
+    "novedad", "parches", "parche", "de", "del", "e", "d", "sobre", "tiene", "tuvo", "el", "la", "los", "las", "en",
+    "dame", "dime", "me", "algo", "alguna", "algunas", "hubo", "salieron", "salió", "salio", "para", "con", "y",
+}
+SIN_JUEGO = {"steam", "hoy", "la semana", "esta semana", "ahora", "semana", "esta", "este mes", "mes"}
+
+
 def _juego_de_noticias(p: str) -> str | None:
     m = re.search(r"(?:\btuvo\b|\btiene\b|\bsobre\b|\bdel\b|\bde\b|\bpara\b)\s+(?:el\s+|la\s+)?(.+)$", p, re.IGNORECASE)
     if m:
         nombre = _limpiar_nombre(m.group(1))
-        if nombre and nombre.lower() not in {"steam", "hoy", "la semana", "esta semana", "ahora"}:
+        if nombre and nombre.lower() not in SIN_JUEGO:
             return nombre
+    # Con errores de dedo ("qué noticias hay e minecraft"): lo que sobra al quitar las palabras de relleno
+    palabras = [w for w in re.findall(r"[\w'’:\-]+", p) if w.lower() not in RELLENO_NOTICIAS]
+    nombre = _limpiar_nombre(" ".join(palabras))
+    if nombre and nombre.lower() not in SIN_JUEGO and len(palabras) <= 6:
+        return nombre
     return None
 
 
@@ -465,6 +479,8 @@ def _ultimo_recurso(pregunta: str, decision: dict) -> dict:
     if decision["tool"] != "none":
         return decision
     texto = RELLENO.sub("", _limpiar_nombre(pregunta)).strip()
+    if texto.lower() in NO_EN_STEAM:   # "minecraft" → avisar, no mostrar Minecraft Dungeons
+        return {"tool": "info_juego", "params": {"juego": texto}}
     if len(texto) < 2 or texto.lower() in SALUDOS or len(texto.split()) > 6:
         return decision
     try:
@@ -547,9 +563,41 @@ def _resolver(nombre: str | None) -> dict | None:
     return buscar_tolerante(nombre)
 
 
+# Juegos famosos que NO están en Steam: mejor decirlo que mostrar otro juego parecido
+NO_EN_STEAM = {
+    "minecraft": "Minecraft no se vende en Steam (se compra en minecraft.net o en la Microsoft Store). En Steam solo están Minecraft Dungeons y Minecraft Legends.",
+    "fortnite": "Fortnite no está en Steam; se descarga gratis desde la Epic Games Store.",
+    "valorant": "Valorant no está en Steam; se descarga gratis desde el cliente de Riot Games.",
+    "league of legends": "League of Legends no está en Steam; se descarga gratis desde el cliente de Riot Games.",
+    "lol": "League of Legends no está en Steam; se descarga gratis desde el cliente de Riot Games.",
+    "roblox": "Roblox no está en Steam; se descarga desde roblox.com o la Microsoft Store.",
+    "genshin": "Genshin Impact no está en Steam; se descarga desde su página oficial o la Epic Games Store.",
+    "genshin impact": "Genshin Impact no está en Steam; se descarga desde su página oficial o la Epic Games Store.",
+    "free fire": "Free Fire es un juego de celular, no está en Steam.",
+    "clash royale": "Clash Royale es un juego de celular, no está en Steam.",
+    "grand theft auto vi": "GTA 6 todavía no está en Steam; Rockstar lo anunció primero para consolas.",
+    "zelda": "Los juegos de Zelda son exclusivos de Nintendo, no están en Steam.",
+    "mario": "Los juegos de Mario son exclusivos de Nintendo, no están en Steam.",
+    "pokemon": "Los juegos de Pokémon son exclusivos de Nintendo, no están en Steam.",
+    "pokémon": "Los juegos de Pokémon son exclusivos de Nintendo, no están en Steam.",
+}
+
+
+def _fuera_de_steam(params: dict) -> str | None:
+    for clave in ("juego", "juego1", "juego2"):
+        nombre = RELLENO.sub("", _limpiar_nombre(str(params.get(clave) or ""))).strip().lower()
+        if nombre in NO_EN_STEAM:
+            return NO_EN_STEAM[nombre]
+    return None
+
+
 def ejecutar_tool(decision: dict):
     tool = decision.get("tool")
     params = decision.get("params", {}) or {}
+
+    aviso = _fuera_de_steam(params)
+    if aviso:
+        return {"error": aviso}
 
     if tool == "get_trending_games":
         return get_trending_games(limit=int(params.get("cantidad") or 10))
