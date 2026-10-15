@@ -94,6 +94,12 @@
     }
   }
 
+  // Al abrir la página se "despierta" el servidor (Render duerme el plan gratis)
+  const aviso = add("Conectando con SteamPulse… (si estaba dormido puede tardar hasta un minuto)");
+  fetch("/health")
+    .then(() => { aviso.textContent = "¡Listo! Pregúntame sobre ofertas, géneros, un juego en específico o compara dos juegos."; })
+    .catch(() => { aviso.textContent = "No pude conectar todavía. Intenta preguntar en unos segundos."; });
+
   f.addEventListener("submit", e => { e.preventDefault(); ask(q.value); });
   document.querySelectorAll(".chip").forEach(c => c.addEventListener("click", () => ask(c.textContent)));
 </script>

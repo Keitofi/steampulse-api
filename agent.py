@@ -371,6 +371,8 @@ def ejecutar_tool(decision: dict):
         return compare_games(j1["appid"], j2["appid"])
     if tool == "get_steam_news":
         juego = _resolver(params.get("juego"))
+        if params.get("juego") and not juego:
+            return {"error": f"No encontré '{params['juego']}' en Steam. Revisa el nombre o prueba con otro juego."}
         noticias = get_steam_news(appid=juego["appid"] if juego else None)
         return {"juego": juego, "noticias": noticias}
     if tool == "similares":
@@ -580,7 +582,6 @@ def formatear_sin_llm(datos) -> str:
 
     if sugerencia:
         lineas.append(f"\nTambién puedes preguntar: {sugerencia}")
-    lineas.append("\n(Respuesta generada sin el LLM)")
     return "\n".join(lineas)
 
 
