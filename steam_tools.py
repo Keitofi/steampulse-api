@@ -71,6 +71,27 @@ def limpiar_texto(texto: str | None, limite: int = 300) -> str:
     return texto[:limite]
 
 
+def buscar_candidatos(nombre_juego: str) -> list[dict]:
+    """Todos los resultados de la búsqueda de la tienda (para elegir el que mejor coincide)."""
+    resp = requests.get(
+        "https://store.steampowered.com/api/storesearch/",
+        params={"term": nombre_juego, "l": "spanish", "cc": "mx"},
+        timeout=TIMEOUT,
+    )
+    resp.raise_for_status()
+    return [{"appid": i["id"], "nombre": i["name"]} for i in resp.json().get("items", [])]
+
+
+def _requisitos(d: dict, tipo: str) -> str:
+    req = d.get("pc_requirements")
+    if not isinstance(req, dict):
+        return ""
+    crudo = re.sub(r"<li>", "\n", req.get(tipo) or "")
+    lineas = [limpiar_texto(x, 200) for x in crudo.split("\n")]
+    lineas = [x for x in lineas if x and not re.fullmatch(r"(?:M[ií]nimo|Recomendado|Minimum|Recommended)\s*:?", x, re.IGNORECASE)]
+    return "\n".join("• " + x for x in lineas[:10])
+
+
 def buscar_appid(nombre_juego: str) -> dict | None:
     """Busca el AppID de un juego por nombre."""
     resp = requests.get(
@@ -111,6 +132,8 @@ def get_game_details(appid: int) -> dict | None:
         "categorias": [c["description"] for c in d.get("categories", [])],
         "idiomas": limpiar_texto(d.get("supported_languages"), 400).replace("*", "").replace(" idiomas con localización de audio", ""),
         "plataformas": [p for p, ok in (d.get("platforms") or {}).items() if ok],
+        "requisitos_minimos": _requisitos(d, "minimum"),
+        "requisitos_recomendados": _requisitos(d, "recommended"),
     }
 
 

@@ -13,6 +13,7 @@ from limits import LLAMADAS_LLM, TIEMPO_MAX_PARA_LLM, PresupuestoAgotado, consum
 from steam_tools import (
     GENEROS,
     buscar_appid,
+    buscar_candidatos,
     buscar_juegos,
     buscar_precios,
     compare_games,
@@ -230,7 +231,7 @@ def _pide_top(p: str) -> bool:
 def _genero_en(p: str) -> str | None:
     p = p.lower()
     for clave in sorted(GENEROS, key=len, reverse=True):
-        if re.search(rf"(?<!\w){re.escape(clave)}(?!\w)", p):
+        if re.search(rf"(?<!\w){re.escape(clave)}(?:s|es)?(?!\w)", p):   # "cooperativos", "rpgs"
             return clave
     return None
 
@@ -277,6 +278,39 @@ def _juego_para_similares(pregunta: str) -> str | None:
     return None
 
 
+PALABRAS_ATRIBUTO = ["multijugador", "multiplayer", "cooperativ", "co-op", "coop", "online", "en línea", "en linea",
+                     "pvp", "español", "espanol", "idioma", "subtítulo", "subtitulo", "doblaje", "doblado",
+                     "mando", "control", "gamepad", "mac", "linux", "steam deck", "gratis", "free to play",
+                     "requisito", "requerimiento", "specs", "bueno", "vale la pena", "jugadores", "un jugador"]
+NO_ES_JUEGO = re.compile(r"^(?:qu[eé]|cu[aá]l|cu[aá]les|hay|alg[uú]n|alguno|algo|juegos?|un juego|el juego|este|ese|esto|eso|y|me|mi|si|s[ií])\b", re.IGNORECASE)
+PATRONES_ATRIBUTO = [
+    # requisitos mínimos del sistema de Undertale / specs de Elden Ring / qué pc necesito para X
+    re.compile(r"(?:requisitos|requerimientos|specs|especificaciones)(?:\s+(?:m[ií]nimos|recomendados|t[eé]cnicos))?"
+               r"(?:\s+(?:del?\s+)?(?:sistema|pc|computadora))?\s+(?:de|del|para|pide|necesita|ocupa)\s+(?:jugar\s+)?(?:el\s+|la\s+)?(.+)", re.IGNORECASE),
+    re.compile(r"(?:pc|computadora|compu)\s+(?:necesito|ocupo|se necesita|pide)\s+para\s+(?:jugar\s+|correr\s+)?(?:el\s+|la\s+)?(.+)", re.IGNORECASE),
+    # en qué idiomas está Danganronpa / idiomas de X
+    re.compile(r"qu[eé]\s+idiomas?\s+(?:est[aá]|viene|tiene|trae|se puede jugar|hay)\s+(?:en\s+)?(?:el\s+|la\s+)?(.+)", re.IGNORECASE),
+    re.compile(r"idiomas?\s+(?:de|del|tiene|trae)\s+(?:el\s+|la\s+)?(.+)", re.IGNORECASE),
+]
+
+
+def _juego_con_atributo(pregunta: str) -> str | None:
+    """Saca el juego de preguntas como '¿Elden Ring es cooperativo?' o 'requisitos de Undertale'."""
+    for patron in PATRONES_ATRIBUTO:
+        m = patron.search(pregunta)
+        if m:
+            nombre = _limpiar_nombre(m.group(1))
+            if nombre and len(nombre.split()) <= 6 and not NO_ES_JUEGO.match(nombre):
+                return nombre
+    m = re.match(r"^\W*(?:el\s+|la\s+)?(.+?)\s+(?:es|tiene|trae|viene|est[aá]|soporta|incluye|corre|sirve|se puede jugar)\b(.*)$",
+                 pregunta, re.IGNORECASE)
+    if m and any(w in m.group(2).lower() for w in PALABRAS_ATRIBUTO):
+        nombre = _limpiar_nombre(m.group(1))
+        if nombre and len(nombre.split()) <= 6 and not NO_ES_JUEGO.match(nombre) and not _genero_en(nombre):
+            return nombre
+    return None
+
+
 def decidir_por_reglas(pregunta: str, contexto: dict | None = None) -> dict:
     """Router determinista: resuelve la mayoría de preguntas sin gastar tokens.
 
@@ -299,6 +333,11 @@ def decidir_por_reglas(pregunta: str, contexto: dict | None = None) -> dict:
             juego = params_previos.get("juego")
         if juego:
             return {"tool": "similares", "params": {"juego": juego}}
+
+    # Pregunta sobre un atributo de un juego nombrado: requisitos, idiomas, "¿Elden Ring es cooperativo?"
+    juego = _juego_con_atributo(pregunta)
+    if juego:
+        return {"tool": "info_juego", "params": {"juego": juego, "atributo": pregunta}}
 
     # Pregunta sobre el juego anterior: "¿es multijugador?", "¿tiene español?", "¿está en oferta?"
     if previo == "info_juego" and params_previos.get("juego") and re.match(
@@ -410,7 +449,7 @@ def _ultimo_recurso(pregunta: str, decision: dict) -> dict:
     """Si nada coincidió, prueba si el texto es el nombre de un juego y muestra su ficha."""
     if decision["tool"] != "none":
         return decision
-    texto = _limpiar_nombre(pregunta)
+    texto = RELLENO.sub("", _limpiar_nombre(pregunta)).strip()
     if len(texto) < 2 or texto.lower() in SALUDOS or len(texto.split()) > 6:
         return decision
     try:
@@ -424,31 +463,72 @@ def _ultimo_recurso(pregunta: str, decision: dict) -> dict:
 
 # ---------------- Ejecutar herramienta ----------------
 
-def buscar_tolerante(nombre: str) -> dict | None:
-    """Busca en Steam aguantando errores de dedo.
+_NUMERO = re.compile(r"^(?:\d+|[ivx]{1,5})$")   # 2, 3, 2077, II, IV, XIV…
 
-    La búsqueda de Steam es muy literal: "Black mith wukong" no regresa nada.
-    Si no hay resultado, se vuelve a buscar quitando una palabra a la vez
-    ("black wukong", "mith wukong"…) y se acepta solo si el juego encontrado
-    se parece a lo que escribió el usuario.
+
+def _sobran_numeros(texto: str, nombre: str) -> bool:
+    """¿El juego encontrado tiene un número que el usuario no escribió? ('Red Dead Redemption' → 'Red Dead Redemption 2')"""
+    usuario = {w for w in _palabras(texto) if _NUMERO.match(w)}
+    juego = {w for w in _palabras(nombre) if _NUMERO.match(w)}
+    return bool(juego - usuario)
+
+
+def _elegir(texto: str, candidatos: list[dict]) -> dict | None:
+    """De los resultados de Steam, el que se parece a lo escrito, prefiriendo el que no agrega una secuela."""
+    parecidos = [c for c in candidatos if _parece_el_juego(texto, c["nombre"] or "")]
+    exactos = [c for c in parecidos if not _sobran_numeros(texto, c["nombre"] or "")]
+    return (exactos or parecidos or [None])[0]
+
+
+def _corregir(texto: str, nombre: str) -> str:
+    """Corrige errores de dedo usando las palabras del juego encontrado: 'read dead' → 'red dead'."""
+    palabras_juego = _palabras(nombre)
+    corregidas = []
+    for w in _palabras(texto):
+        cercana = difflib.get_close_matches(w, palabras_juego, n=1, cutoff=0.75) if len(w) >= 3 else []
+        corregidas.append(cercana[0] if cercana else w)
+    return " ".join(corregidas)
+
+
+def buscar_tolerante(nombre: str) -> dict | None:
+    """Busca en Steam aguantando errores de dedo y sin brincar a la secuela.
+
+    1. Busca normal y elige el resultado que más se parece (no siempre el primero).
+    2. Si no hay, o el encontrado es una secuela que el usuario no pidió, reintenta:
+       con las palabras corregidas ('read dead redemption' → 'red dead redemption')
+       y quitando una palabra a la vez ('black mith wukong' → 'black wukong').
     """
-    encontrado = buscar_appid(nombre)
-    if encontrado:
-        return encontrado
+    candidatos = buscar_candidatos(nombre)
+    elegido = _elegir(nombre, candidatos)
+    if elegido and not _sobran_numeros(nombre, elegido["nombre"] or ""):
+        return elegido
+
+    intentos = []
+    base = elegido or (candidatos[0] if candidatos else None)
+    if base:
+        corregido = _corregir(nombre, base["nombre"] or "")
+        if corregido != " ".join(_palabras(nombre)):
+            intentos.append(corregido)
     palabras = [w for w in re.split(r"[\s:\-]+", nombre) if w]
-    if len(palabras) < 2:
-        return None
-    for i in sorted(range(len(palabras)), key=lambda k: len(palabras[k]))[:4]:   # primero quita las más cortas
-        intento = " ".join(palabras[:i] + palabras[i + 1:])
-        encontrado = buscar_appid(intento)
-        if encontrado and _parece_el_juego(nombre, encontrado["nombre"] or ""):
-            return encontrado
-    return None
+    if len(palabras) >= 2:
+        for i in sorted(range(len(palabras)), key=lambda k: len(palabras[k]))[:3]:   # primero quita las más cortas
+            intentos.append(" ".join(palabras[:i] + palabras[i + 1:]))
+
+    for intento in intentos[:4]:
+        otro = _elegir(nombre, buscar_candidatos(intento))
+        if otro and not _sobran_numeros(nombre, otro["nombre"] or ""):
+            return otro
+        elegido = elegido or otro
+    return elegido or (candidatos[0] if candidatos else None)
+
+
+RELLENO = re.compile(r"^(?:(?:el|la|los|las|un|una)\s+)?(?:video)?juegos?\s+(?:de\s+|llamado\s+|que se llama\s+)?", re.IGNORECASE)
 
 
 def _resolver(nombre: str | None) -> dict | None:
     if not nombre:
         return None
+    nombre = RELLENO.sub("", _limpiar_nombre(nombre)).strip() or nombre   # "el juego restory" → "restory"
     return buscar_tolerante(nombre)
 
 
@@ -513,6 +593,26 @@ def _responder_atributo(pregunta: str, info: dict) -> str | None:
     """Responde preguntas de sí/no sobre un juego usando sus datos de Steam."""
     p = pregunta.lower()
     nombre = info["nombre"]
+
+    if any(w in p for w in ["requisit", "requerimient", "specs", "especificacion", "qué pc", "que pc", "computadora", "compu "]):
+        minimos, recomendados = info.get("requisitos_minimos"), info.get("requisitos_recomendados")
+        if not minimos and not recomendados:
+            return f"Steam no publica requisitos de PC para {nombre}."
+        texto = f"Requisitos mínimos de {nombre}:\n{minimos or 'N/D'}"
+        if recomendados:
+            texto += f"\n\nRecomendados:\n{recomendados}"
+        return texto
+
+    if any(w in p for w in ["cooperativ", "co-op", "coop"]):
+        coop = _tiene_categoria(info, ["cooperativo", "co-op"])
+        if coop:
+            return f"Sí, {nombre} tiene modo cooperativo: {', '.join(coop)}."
+        multi = _tiene_categoria(info, ["multijugador", "jcj", "pvp", "multi-player", "online"])
+        extra = f" Lo que sí tiene: {', '.join(multi)}." if multi else " Según Steam es para un jugador."
+        return f"No, {nombre} no tiene modo cooperativo.{extra}"
+
+    if re.search(r"(?:qu[eé]|cu[aá]les?)\s+idiomas?|idiomas\s+(?:de|del|tiene|trae)", p):
+        return f"{nombre} está en: {info.get('idiomas') or 'N/D'}"
 
     if any(w in p for w in ["multijugador", "multiplayer", "online", "en línea", "en linea", "amigos", "cooperativo", "co-op", "coop", "jugar con"]):
         encontradas = _tiene_categoria(info, ["multijugador", "cooperativo", "jcj", "pvp", "co-op", "multi-player", "online"])
