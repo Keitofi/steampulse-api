@@ -54,6 +54,9 @@ GENEROS = {
     "medieval": ("Medieval", 4172),
     "carros": ("Carreras", 699), "autos": ("Carreras", 699), "coches": ("Carreras", 699),
     "sobrevivir": ("Supervivencia", 1662),
+    "gratis": ("Gratis", 113),
+    "gratuito": ("Gratis", 113),
+    "free to play": ("Gratis", 113),
 }
 
 

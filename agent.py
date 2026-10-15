@@ -205,7 +205,7 @@ def _juego_de_noticias(p: str) -> str | None:
     return None
 
 
-NUMEROS = {"un": 1, "uno": 1, "dos": 2, "tres": 3, "cuatro": 4, "cinco": 5, "seis": 6,
+NUMEROS = {"dos": 2, "tres": 3, "cuatro": 4, "cinco": 5, "seis": 6,
            "siete": 7, "ocho": 8, "nueve": 9, "diez": 10}
 
 
@@ -219,13 +219,26 @@ def _cantidad_en(p: str, por_defecto: int) -> int:
     return por_defecto
 
 
+SOLO_SALUDO = re.compile(r"^\W*buen[oa]s?(?:\s+(?:tardes|noches|d[ií]as))?\W*$", re.IGNORECASE)
+
+
+def _pide_buenos(p: str) -> bool:
+    """'qué buenos juegos hay', 'juegos chidos', 'algo bueno para jugar' (pero no 'buenas tardes')."""
+    if SOLO_SALUDO.match(p):
+        return False
+    return bool(re.search(r"\b(?:buen[oa]s?|chid[oa]s?|padres?|recomendable|vale[n]? la pena)\b|de bueno", p))
+
+
 def _pide_resenas(p: str) -> bool:
-    return any(w in p for w in ["rankead", "calificad", "valorad", "reseña", "resena", "rating", "puntuad", "review", "mejor evaluad"])
+    return _pide_buenos(p) or any(w in p for w in ["rankead", "calificad", "valorad", "reseña", "resena", "rating",
+                                                    "puntuad", "review", "mejor evaluad", "recomi"])
 
 
 def _pide_top(p: str) -> bool:
-    return any(w in p for w in ["mejor", "top", "rankead", "ranking", "más vendid", "mas vendid",
-                                "temporada", "recomi", "calificad", "valorad", "qué juego compro", "que juego compro"])
+    return _pide_buenos(p) or any(w in p for w in [
+        "mejor", "top", "rankead", "ranking", "más vendid", "mas vendid", "temporada", "recomi", "calificad",
+        "valorad", "qué juego compro", "que juego compro", "qué puedo jugar", "que puedo jugar",
+        "qué juego juego", "que juego juego", "algo para jugar", "qué jugar", "que jugar", "estoy aburrid"])
 
 
 def _genero_en(p: str) -> str | None:
@@ -729,7 +742,10 @@ def formatear_sin_llm(datos) -> str:
             tipo = "en oferta"
         else:
             tipo = "más vendidos ahora"
-        titulo = f"Juegos de {datos['genero']} {tipo}" if datos.get("genero") else f"Juegos {tipo}"
+        if datos.get("genero") == "Gratis":
+            titulo = f"Juegos gratis {tipo}"
+        else:
+            titulo = f"Juegos de {datos['genero']} {tipo}" if datos.get("genero") else f"Juegos {tipo}"
         if not datos["juegos"]:
             return f"No encontré resultados para: {titulo.lower()}."
         lineas.append(f"{titulo} en Steam:")
