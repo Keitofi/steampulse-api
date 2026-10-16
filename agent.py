@@ -9,6 +9,7 @@ import uuid
 
 import requests
 
+from observability import LLAMADAS_DETALLE, estimar_tokens, registrar_llamada_llm, registrar_pregunta
 from limits import LLAMADAS_LLM, TIEMPO_MAX_PARA_LLM, PresupuestoAgotado, consumir_llamada_llm, estado_llm
 from steam_tools import (
     GENEROS,
@@ -41,10 +42,10 @@ TOOLS_PERMITIDAS = {
 
 TOOLS_DESCRIPCION = """
 1. get_trending_games — Juegos más jugados en Steam ahora mismo. params: {}
-2. get_best_deals — Mejores ofertas y descuentos activos. params: {}
+2. get_best_deals — Mejores ofertas y descuentos activos. params: {"min_descuento": 0} (ej. 50 si piden "más del 50%")
 3. compare_games — Compara dos juegos. params: {"juego1": "nombre", "juego2": "nombre"}
 4. get_steam_news — Noticias o actualizaciones de un juego. params: {"juego": "nombre"} (vacío = noticias generales de Steam)
-5. buscar_por_genero — Juegos populares de un género (terror, rpg, carreras, estrategia...). params: {"genero": "terror", "solo_ofertas": false, "cantidad": 6, "por_resenas": false}
+5. buscar_por_genero — Juegos populares de un género (terror, rpg, carreras, estrategia...). params: {"genero": "terror", "solo_ofertas": false, "cantidad": 6, "por_resenas": false, "min_descuento": 0}
 5b. top_juegos — Los mejores / más vendidos / mejor calificados del momento. params: {"cantidad": 5, "por_resenas": false}
 6. info_juego — Ficha de un juego: precio, géneros, descripción y jugadores conectados ahora. params: {"juego": "nombre"}
 7. precios — Precios de un juego o de toda una saga (ej. Five Nights at Freddy's). params: {"juego": "nombre"}
@@ -82,7 +83,7 @@ def _extract_text(data) -> str | None:
     return None
 
 
-def call_llm(system_prompt: str, prompt: str, max_tokens: int = 600) -> str:
+def call_llm(system_prompt: str, prompt: str, max_tokens: int = 600, proposito: str = "respuesta") -> str:
     base_url = os.getenv("BASE_URL", "https://api.artesaniadigital.org").rstrip("/")
     api_key = os.getenv("API_KEY")
     if not api_key:
@@ -101,16 +102,38 @@ def call_llm(system_prompt: str, prompt: str, max_tokens: int = 600) -> str:
     }
     headers = {"X-Student-Key": api_key, "Content-Type": "application/json"}
 
+    tokens_prompt = estimar_tokens(system_prompt) + estimar_tokens(prompt)
+
     # Un reintento si el backend falla con error 5xx (suele ser transitorio)
     for intento in range(2):
         consumir_llamada_llm()  # cada intento cuenta contra el presupuesto diario
-        resp = requests.post(f"{base_url}/v1/completions", headers=headers, json=payload, timeout=90)
+        inicio = time.perf_counter()
+        try:
+            resp = requests.post(f"{base_url}/v1/completions", headers=headers, json=payload, timeout=90)
+        except requests.RequestException as exc:
+            registrar_llamada_llm(proposito, round((time.perf_counter() - inicio) * 1000), None,
+                                  tokens_prompt, 0, True, type(exc).__name__)
+            if intento == 1:
+                raise
+            continue
+        ms = round((time.perf_counter() - inicio) * 1000)
+        if not resp.ok:
+            registrar_llamada_llm(proposito, ms, resp.status_code, tokens_prompt, 0, True, resp.text[:150])
         if resp.status_code < 500 or intento == 1:
             break
         time.sleep(2)
 
     resp.raise_for_status()
-    text = _extract_text(resp.json())
+    data = resp.json()
+    text = _extract_text(data)
+    # Tokens reales si el backend los reporta; si no, estimados (~4 caracteres por token)
+    uso = data.get("usage") if isinstance(data, dict) else None
+    uso = uso if isinstance(uso, dict) else {}
+    entrada = uso.get("prompt_tokens") or uso.get("input_tokens")
+    salida = uso.get("completion_tokens") or uso.get("output_tokens")
+    registrar_llamada_llm(proposito, ms, resp.status_code,
+                          entrada or tokens_prompt, salida or estimar_tokens(text or ""),
+                          estimado=not (entrada and salida))
     if not text:
         raise RuntimeError("El backend no devolvió texto")
     return text
@@ -209,14 +232,28 @@ RELLENO_NOTICIAS = {
 SIN_JUEGO = {"steam", "hoy", "la semana", "esta semana", "ahora", "semana", "esta", "este mes", "mes"}
 
 
+RELLENO_FINAL = {"hay", "ay", "porfa", "porfavor", "plis", "pls", "please", "hoy", "ahora", "ahorita", "actualmente",
+                 "recientes", "nuevas", "nuevos", "nuevo", "nueva", "últimas", "ultimas", "gracias", "tiene", "tuvo",
+                 "salió", "salio", "salieron", "hubo", "también", "tambien", "pues", "xfa", "x", "fa"}
+
+
+def _quitar_relleno_final(nombre: str) -> str:
+    """'terraria hay' → 'terraria' · 'elden ring por favor' → 'elden ring'."""
+    nombre = re.sub(r"\s+por\s+favor\s*$", "", _limpiar_nombre(nombre), flags=re.IGNORECASE)
+    palabras = nombre.split()
+    while len(palabras) > 1 and palabras[-1].lower().strip("¿?¡!.,") in RELLENO_FINAL:
+        palabras.pop()
+    return _limpiar_nombre(" ".join(palabras))
+
+
 def _juego_de_noticias(p: str) -> str | None:
     m = re.search(r"(?:\btuvo\b|\btiene\b|\bsobre\b|\bdel\b|\bde\b|\bpara\b)\s+(?:el\s+|la\s+)?(.+)$", p, re.IGNORECASE)
     if m:
         # "qué hay de noticias de terraria" → quitar "noticias de" que quedó al inicio
         palabras = _limpiar_nombre(m.group(1)).split()
-        while palabras and palabras[0].lower().strip("¿?¡!.,") in RELLENO_NOTICIAS:
+        while palabras and palabras[0].lower().strip("¿?¡!.,") in RELLENO_NOTICIAS - {"hay", "ay"}:
             palabras.pop(0)
-        nombre = _limpiar_nombre(" ".join(palabras))
+        nombre = _quitar_relleno_final(" ".join(palabras))
         if nombre and nombre.lower() not in SIN_JUEGO:
             return nombre
     # Con errores de dedo ("qué noticias hay e minecraft"): lo que sobra al quitar las palabras de relleno
@@ -231,8 +268,19 @@ NUMEROS = {"dos": 2, "tres": 3, "cuatro": 4, "cinco": 5, "seis": 6,
            "siete": 7, "ocho": 8, "nueve": 9, "diez": 10}
 
 
+def _descuento_minimo(p: str) -> int:
+    """'más del 50%', '70% o más', 'arriba de 60', 'a mitad de precio' → % mínimo de descuento (0 si no pide)."""
+    p = p.lower()
+    if "mitad de precio" in p:
+        return 50
+    m = (re.search(r"(?:m[aá]s\s+del?|arriba\s+del?|mayor(?:es)?\s+(?:a|al|de|del)|m[ií]nimo(?:\s+de(?:l)?)?|al\s+menos|por\s+lo\s+menos|desde|sobre)\s*(?:un\s+|el\s+)?(\d{1,2})\s*%?", p)
+         or re.search(r"(\d{1,2})\s*%\s*(?:o\s+m[aá]s|para\s+arriba|o\s+mayor|en\s+adelante)", p)
+         or re.search(r"(\d{1,2})\s*%", p))
+    return int(m.group(1)) if m else 0
+
+
 def _cantidad_en(p: str, por_defecto: int) -> int:
-    m = re.search(r"\b(\d{1,2})\b", p)
+    m = re.search(r"\b(\d{1,2})\b(?!\s*%)(?!\s+(?:de\s+)?(?:descuento|por\s*ciento))", p)
     if m:
         return max(1, min(int(m.group(1)), 10))
     for palabra, n in NUMEROS.items():
@@ -354,7 +402,8 @@ def decidir_por_reglas(pregunta: str, contexto: dict | None = None) -> dict:
     p = pregunta.lower()
     previo = (contexto or {}).get("tool")
     params_previos = (contexto or {}).get("params") or {}
-    pide_ofertas = any(w in p for w in ["oferta", "descuento", "barato", "rebaja", "sale"])
+    pide_ofertas = any(w in p for w in ["oferta", "ofrerta", "oferts", "descuento", "barato", "rebaja", "promo", "mitad de precio"])
+    min_desc = _descuento_minimo(p) if pide_ofertas else 0
 
     juegos = _juegos_a_comparar(pregunta)
     if juegos:
@@ -385,8 +434,10 @@ def decidir_por_reglas(pregunta: str, contexto: dict | None = None) -> dict:
     if genero:
         solo_ofertas = pide_ofertas or previo == "get_best_deals"
         recomienda = any(w in p for w in ["recomi", "me gusta", "qué juego", "que juego", "qué juegos", "que juegos"])
+        params_genero = {"min_descuento": min_desc} if min_desc else {}
         return {"tool": "buscar_por_genero", "params": {
-            "genero": genero, "solo_ofertas": solo_ofertas,
+            **params_genero,
+            "genero": genero, "solo_ofertas": solo_ofertas or bool(min_desc),
             "cantidad": _cantidad_en(pregunta, 6), "por_resenas": _pide_resenas(p) or recomienda}}
 
     m = PATRON_PRECIO.search(pregunta)
@@ -400,8 +451,9 @@ def decidir_por_reglas(pregunta: str, contexto: dict | None = None) -> dict:
             return {"tool": "info_juego", "params": {"juego": _limpiar_nombre(m.group(1)), "atributo": pregunta}}
         # "¿y en oferta?" después de buscar un género → ofertas de ese género
         if previo == "buscar_por_genero" and params_previos.get("genero"):
-            return {"tool": "buscar_por_genero", "params": {"genero": params_previos["genero"], "solo_ofertas": True}}
-        return {"tool": "get_best_deals", "params": {}}
+            return {"tool": "buscar_por_genero", "params": {"genero": params_previos["genero"], "solo_ofertas": True,
+                                                            **({"min_descuento": min_desc} if min_desc else {})}}
+        return {"tool": "get_best_deals", "params": {"min_descuento": min_desc} if min_desc else {}}
 
     if any(w in p for w in ["noticia", "actualizaci", "update", "parche", "novedad"]):
         juego = _juego_de_noticias(pregunta)
@@ -465,7 +517,7 @@ Si la pregunta es un seguimiento, usa la pregunta anterior para entenderla."""
             f"Pregunta actual: {pregunta}"
         )
     try:
-        texto = call_llm(system_prompt, entrada, max_tokens=1000)
+        texto = call_llm(system_prompt, entrada, max_tokens=1000, proposito="router")
         match = re.search(r"\{.*\}", texto, re.DOTALL)
         decision = json.loads(match.group(0)) if match else {}
         if decision.get("tool") in TOOLS_PERMITIDAS and decision["tool"] != "none":
@@ -566,6 +618,7 @@ def _resolver(nombre: str | None) -> dict | None:
     if not nombre:
         return None
     nombre = RELLENO.sub("", _limpiar_nombre(nombre)).strip() or nombre   # "el juego restory" → "restory"
+    nombre = _quitar_relleno_final(nombre) or nombre                       # "terraria hay" → "terraria"
     return buscar_tolerante(nombre)
 
 
@@ -610,7 +663,12 @@ def ejecutar_tool(decision: dict):
     if tool == "top_juegos":
         return buscar_juegos(cantidad=int(params.get("cantidad") or 5), por_resenas=bool(params.get("por_resenas")))
     if tool == "get_best_deals":
-        return get_best_deals()
+        minimo = int(params.get("min_descuento") or 0)
+        ofertas = get_best_deals(min_descuento=minimo)
+        if not ofertas:
+            return {"error": f"Ahorita no encontré ofertas con {minimo}% o más de descuento. Prueba con un porcentaje menor."
+                    if minimo else "No encontré ofertas activas en este momento."}
+        return ofertas
     if tool == "compare_games":
         j1 = _resolver(params.get("juego1"))
         j2 = _resolver(params.get("juego2"))
@@ -653,6 +711,7 @@ def ejecutar_tool(decision: dict):
             solo_ofertas=bool(params.get("solo_ofertas")),
             cantidad=int(params.get("cantidad") or 6),
             por_resenas=bool(params.get("por_resenas")),
+            min_descuento=int(params.get("min_descuento") or 0),
         )
     return None
 
@@ -797,6 +856,8 @@ def formatear_sin_llm(datos) -> str:
     elif isinstance(datos, dict) and "juegos" in datos:
         if datos.get("por_resenas"):
             tipo = "mejor calificados (entre los más vendidos)"
+        elif datos.get("min_descuento"):
+            tipo = f"con {datos['min_descuento']}% o más de descuento"
         elif datos.get("solo_ofertas"):
             tipo = "en oferta"
         else:
@@ -820,7 +881,8 @@ def formatear_sin_llm(datos) -> str:
         else:
             sugerencia = f"¿Sabes de {datos['juegos'][0]['nombre']}?"
     elif isinstance(datos, list) and datos and "descuento" in datos[0]:
-        lineas.append("Mejores ofertas en Steam ahora mismo:")
+        minimo = datos[0].get("minimo")
+        lineas.append(f"Ofertas en Steam con {minimo}% o más de descuento:" if minimo else "Mejores ofertas en Steam ahora mismo:")
         for o in sorted(datos, key=lambda x: int(x["descuento"].rstrip("%")), reverse=True):
             termina = f" — termina el {o['termina']}" if o.get("termina") else ""
             lineas.append(f"• {o['nombre']} — {o['precio_final']} ({o['descuento']} de descuento, antes {o['precio_original']}){termina}")
@@ -887,7 +949,7 @@ Al final sugiere en una línea qué más puede preguntar (ofertas, géneros, not
         f"Datos de Steam: {json.dumps(_compactar(datos), ensure_ascii=False, default=str)}"
     )
     try:
-        return call_llm(system_prompt, prompt, max_tokens=2000), True, None
+        return call_llm(system_prompt, prompt, max_tokens=2000, proposito="respuesta"), True, None
     except PresupuestoAgotado as exc:
         return formatear_sin_llm(datos), False, str(exc)
     except requests.HTTPError as exc:
@@ -900,6 +962,22 @@ Al final sugiere en una línea qué más puede preguntar (ofertas, géneros, not
 # ---------------- Agente principal ----------------
 
 def steampulse(pregunta: str, contexto: dict | None = None) -> dict:
+    """Responde una pregunta y la registra para observabilidad."""
+    llamadas = []
+    token = LLAMADAS_DETALLE.set(llamadas)
+    try:
+        resultado = _steampulse(pregunta, contexto)
+    finally:
+        LLAMADAS_DETALLE.reset(token)
+    resultado["observabilidad"] = {"llm": llamadas}
+    try:
+        registrar_pregunta(resultado)
+    except Exception:
+        pass   # la observabilidad nunca debe tumbar una respuesta
+    return resultado
+
+
+def _steampulse(pregunta: str, contexto: dict | None = None) -> dict:
     request_id = str(uuid.uuid4())[:8]
     trace = []
     inicio_total = time.perf_counter()

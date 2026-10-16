@@ -173,8 +173,8 @@ def get_trending_games(limit: int = 10) -> list[dict]:
     return juegos
 
 
-def get_best_deals(max_results: int = 10) -> list[dict]:
-    """Mejores ofertas activas en Steam (precios en MXN)."""
+def get_best_deals(max_results: int = 10, min_descuento: int = 0) -> list[dict]:
+    """Mejores ofertas activas en Steam (precios en MXN). Con min_descuento solo las de ese % o más."""
     resp = requests.get(
         "https://store.steampowered.com/api/featuredcategories",
         params={"cc": "mx", "l": "spanish"},
@@ -183,10 +183,13 @@ def get_best_deals(max_results: int = 10) -> list[dict]:
     resp.raise_for_status()
     specials = resp.json().get("specials", {}).get("items", [])
 
-    ofertas = []
-    for item in specials[:max_results]:
+    ofertas, vistos = [], set()
+    for item in specials:
         descuento = item.get("discount_percent", 0)
-        if descuento > 0:
+        if len(ofertas) >= max_results:
+            break
+        if descuento > 0 and descuento >= min_descuento and item.get("id") not in vistos:
+            vistos.add(item.get("id"))
             original = item.get("original_price", 0) / 100
             final = item.get("final_price", 0) / 100
             ofertas.append({
@@ -197,6 +200,22 @@ def get_best_deals(max_results: int = 10) -> list[dict]:
                 "descuento": f"{descuento}%",
                 "ahorro": f"${original - final:.2f}",
                 "termina": _fecha_mx(item.get("discount_expiration")),
+                "minimo": min_descuento,
+            })
+
+    # Si piden un descuento mínimo y las destacadas no alcanzan, se buscan más entre las ofertas más vendidas
+    if min_descuento and len(ofertas) < 5:
+        extra = buscar_juegos(solo_ofertas=True, cantidad=max_results - len(ofertas), min_descuento=min_descuento,
+                              excluir_appids=vistos)
+        for j in extra["juegos"]:
+            ofertas.append({
+                "appid": j.get("appid"),
+                "nombre": j["nombre"],
+                "precio_original": j["precio_original"],
+                "precio_final": j["precio"],
+                "descuento": f"{j['descuento']}%",
+                "termina": None,
+                "minimo": min_descuento,
             })
     return ofertas
 
@@ -388,6 +407,8 @@ def buscar_juegos(
     por_resenas: bool = False,
     tag_ids: list[int] | None = None,
     excluir_appid: int | None = None,
+    min_descuento: int = 0,
+    excluir_appids: set | None = None,
 ) -> dict:
     """Juegos más vendidos ahora (opcional: de un género, solo en oferta, o ordenados por reseñas)."""
     params = {"json": 1, "filter": "topsellers", "cc": "mx", "l": "spanish"}
@@ -404,17 +425,24 @@ def buscar_juegos(
 
     # Para ordenar por reseñas revisamos más candidatos y nos quedamos con los mejores
     candidatos = 12 if por_resenas else cantidad
+    revisados = 0
     juegos = []
     for item in resp.json().get("items", []):
+        if min_descuento and revisados >= 25:   # tope para no tardar demasiado
+            break
         m = re.search(r"/apps/(\d+)/", item.get("logo", ""))
         if not m:
             continue
         appid = int(m.group(1))
-        if appid == excluir_appid:
+        if appid == excluir_appid or (excluir_appids and appid in excluir_appids):
             continue
         detalle = get_game_details(appid)
+        revisados += 1
+        if detalle and min_descuento and (detalle.get("descuento") or 0) < min_descuento:
+            continue
         if detalle and detalle.get("tipo") in (None, "game"):  # fuera hardware, DLC y soundtracks
             juegos.append({
+                "appid": appid,
                 "nombre": detalle["nombre"],
                 "precio": detalle["precio"],
                 "precio_original": detalle["precio_original"],
@@ -434,6 +462,7 @@ def buscar_juegos(
         "genero": nombre_genero,
         "solo_ofertas": solo_ofertas,
         "por_resenas": por_resenas,
+        "min_descuento": min_descuento,
         "juegos": juegos[:cantidad],
     }
 

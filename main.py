@@ -14,6 +14,7 @@ from pydantic import BaseModel
 
 from agent import steampulse
 from limits import PREGUNTAS_POR_MINUTO, estado_llm, permitir_pregunta
+from observability import contar, metricas
 from steam_tools import (
     buscar_appid,
     compare_games,
@@ -41,6 +42,7 @@ def _steam(fn, *args, **kwargs):
 
 
 INDEX_HTML = Path(__file__).parent / "static" / "index.html"
+PANEL_HTML = Path(__file__).parent / "static" / "observabilidad.html"
 
 
 @app.get("/", response_class=HTMLResponse, include_in_schema=False)
@@ -56,6 +58,17 @@ def health():
         "llm": estado_llm(),
         "preguntas_por_minuto": PREGUNTAS_POR_MINUTO,
     }
+
+
+@app.get("/metrics")
+def metrics():
+    """Observabilidad: en qué se va el tiempo, llamadas y tokens del LLM, errores y preguntas no entendidas."""
+    return metricas(estado_llm())
+
+
+@app.get("/observabilidad", response_class=HTMLResponse, include_in_schema=False)
+def panel_observabilidad():
+    return PANEL_HTML.read_text(encoding="utf-8")
 
 
 def _cliente(request: Request) -> str:
@@ -102,6 +115,7 @@ def ask(request: AskRequest, http: Request):
         raise HTTPException(status_code=422, detail="La pregunta es muy larga (máx. 500 caracteres)")
     permitido, espera = permitir_pregunta(_cliente(http))
     if not permitido:
+        contar("rechazada_por_limite")
         raise HTTPException(
             status_code=429,
             detail=f"Hiciste muchas preguntas seguidas. Espera {espera} segundos e intenta de nuevo.",

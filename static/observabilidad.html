@@ -1,0 +1,194 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SteamPulse · Observabilidad</title>
+<style>
+  :root { --bg:#0f1419; --card:#1a2129; --line:#2a333d; --text:#e6edf3; --muted:#8b98a5; --accent:#66c0f4; --bad:#e5534b; }
+  * { box-sizing:border-box; }
+  body { margin:0; font-family:system-ui,-apple-system,"Segoe UI",sans-serif; background:var(--bg); color:var(--text); }
+  main { max-width:960px; margin:0 auto; padding:28px 16px 48px; }
+  h1 { margin:0 0 4px; font-size:26px; }
+  h2 { font-size:16px; margin:0 0 12px; }
+  .sub { color:var(--muted); margin:0 0 20px; font-size:14px; }
+  a { color:var(--accent); }
+  .kpis { display:grid; grid-template-columns:repeat(auto-fit, minmax(150px, 1fr)); gap:10px; margin-bottom:16px; }
+  .kpi, .card { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:14px 16px; }
+  .kpi .label { color:var(--muted); font-size:12px; }
+  .kpi .value { font-size:26px; font-weight:650; margin-top:4px; font-variant-numeric:tabular-nums; }
+  .kpi .note { color:var(--muted); font-size:12px; margin-top:2px; }
+  .grid { display:grid; grid-template-columns:repeat(auto-fit, minmax(300px, 1fr)); gap:12px; margin-bottom:12px; }
+  .bar-row { display:grid; grid-template-columns:minmax(110px, 38%) 1fr; gap:10px; align-items:center; margin:8px 0; font-size:13px; }
+  .bar-label { color:var(--text); }
+  .bar-track { display:flex; align-items:center; gap:8px; }
+  .bar { height:14px; background:var(--accent); border-radius:0 4px 4px 0; min-width:2px; }
+  .bar-value { color:var(--muted); font-variant-numeric:tabular-nums; white-space:nowrap; }
+  table { width:100%; border-collapse:collapse; font-size:13px; }
+  th { text-align:left; color:var(--muted); font-weight:500; padding:6px 4px; border-bottom:1px solid var(--line); }
+  td { padding:6px 4px; border-bottom:1px solid var(--line); vertical-align:top; }
+  td.num, th.num { text-align:right; font-variant-numeric:tabular-nums; }
+  ul.list { list-style:none; margin:0; padding:0; font-size:13px; }
+  ul.list li { padding:7px 0; border-bottom:1px solid var(--line); }
+  ul.list .ts { color:var(--muted); font-size:11px; display:block; }
+  .err { color:#f0a6a1; }
+  .empty { color:var(--muted); font-size:13px; }
+  .pill { display:inline-block; border:1px solid var(--line); border-radius:999px; padding:2px 8px; font-size:12px; margin:0 6px 6px 0; }
+  .pill.bad { border-color:var(--bad); color:#f0a6a1; }
+</style>
+</head>
+<body>
+<main>
+  <h1>📊 Observabilidad de SteamPulse</h1>
+  <p class="sub" id="sub">Cargando…</p>
+
+  <div class="kpis" id="kpis"></div>
+
+  <div class="grid">
+    <section class="card">
+      <h2>¿En qué se va el tiempo?</h2>
+      <div id="tiempo"></div>
+    </section>
+    <section class="card">
+      <h2>Llamadas al LLM</h2>
+      <div id="llm"></div>
+    </section>
+  </div>
+
+  <section class="card" style="margin-bottom:12px">
+    <h2>Por herramienta</h2>
+    <div id="tools"></div>
+  </section>
+
+  <div class="grid">
+    <section class="card">
+      <h2>Preguntas que no entendió</h2>
+      <div id="noent"></div>
+    </section>
+    <section class="card">
+      <h2>Errores recientes</h2>
+      <div id="errores"></div>
+    </section>
+  </div>
+
+  <section class="card">
+    <h2>Preguntas más lentas</h2>
+    <div id="lentas"></div>
+  </section>
+
+  <p class="sub" style="margin-top:16px">Datos en JSON: <a href="/metrics">/metrics</a> · Volver al <a href="/">chat</a></p>
+</main>
+<script>
+  const $ = id => document.getElementById(id);
+  const el = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; };
+  const n = v => (v == null ? "—" : Number(v).toLocaleString("es-MX"));
+  const seg = ms => (ms == null ? "—" : (ms / 1000).toFixed(1) + " s");
+  const vacio = (box, texto) => { box.replaceChildren(el("p", "empty", texto)); };
+
+  function kpi(label, value, note) {
+    const k = el("div", "kpi");
+    k.append(el("div", "label", label), el("div", "value", value));
+    if (note) k.append(el("div", "note", note));
+    return k;
+  }
+
+  function barras(box, filas, etiqueta, valor, texto) {
+    if (!filas.length) return vacio(box, "Todavía no hay datos.");
+    const max = Math.max(...filas.map(valor), 1);
+    box.replaceChildren(...filas.map(f => {
+      const row = el("div", "bar-row");
+      const track = el("div", "bar-track");
+      const bar = el("div", "bar");
+      bar.style.width = (85 * valor(f) / max) + "%";
+      bar.title = `${etiqueta(f)}: ${texto(f)}`;
+      track.append(bar, el("span", "bar-value", texto(f)));
+      row.append(el("span", "bar-label", etiqueta(f)), track);
+      return row;
+    }));
+  }
+
+  function tabla(box, columnas, filas) {
+    if (!filas.length) return vacio(box, "Todavía no hay datos.");
+    const t = el("table");
+    const head = el("tr");
+    columnas.forEach(c => head.append(el("th", c.num ? "num" : "", c.titulo)));
+    t.append(head);
+    filas.forEach(f => {
+      const tr = el("tr");
+      columnas.forEach(c => tr.append(el("td", c.num ? "num" : "", c.valor(f))));
+      t.append(tr);
+    });
+    box.replaceChildren(t);
+  }
+
+  function lista(box, filas, texto, cls, vacioTxt) {
+    if (!filas.length) return vacio(box, vacioTxt);
+    const ul = el("ul", "list");
+    filas.forEach(f => {
+      const li = el("li");
+      li.append(el("span", "ts", f.ts), el("span", cls || "", texto(f)));
+      ul.append(li);
+    });
+    box.replaceChildren(ul);
+  }
+
+  async function cargar() {
+    let m;
+    try {
+      m = await (await fetch("/metrics")).json();
+    } catch (e) {
+      $("sub").textContent = "No pude cargar /metrics. Intenta recargar.";
+      return;
+    }
+    const p = m.preguntas, l = m.llm, t = m.tiempo;
+    $("sub").textContent = `Desde ${m.desde} (${m.minutos_activo} min activo) · se actualiza cada 15 s · si Render duerme el servicio, los contadores vuelven a cero`;
+
+    const sinLLM = p.total ? Math.round(100 * p.resueltas_por_reglas / p.total) : 0;
+    const pres = l.presupuesto_hoy;
+    $("kpis").replaceChildren(
+      kpi("Preguntas", n(p.total), `${n(p.no_entendidas)} no entendidas`),
+      kpi("Resueltas por reglas", sinLLM + "%", "sin gastar el LLM para decidir"),
+      kpi("Llamadas al LLM", n(l.llamadas), `${n(l.exitosas)} ok · ${n(l.fallidas)} fallidas`),
+      kpi("Tokens del LLM", n(l.tokens_entrada + l.tokens_salida), (l.tokens_son_estimados ? "≈ estimados · " : "") + `${n(l.tokens_entrada)} entrada · ${n(l.tokens_salida)} salida`),
+      kpi("Tiempo por pregunta", seg(t.ms_promedio), `p95: ${seg(t.ms_p95)}`),
+      kpi("LLM restantes hoy", pres ? n(pres.restantes_hoy) : "—", (pres ? `de ${n(pres.limite_diario)} · ` : "") + (p.rechazadas_por_limite ? `${n(p.rechazadas_por_limite)} frenadas por límite` : "sin rechazos por límite"))
+    );
+
+    barras($("tiempo"), t.por_paso, f => f.paso, f => f.ms, f => `${f.porcentaje}% · ${seg(f.ms)}`);
+
+    const llm = $("llm");
+    if (!l.llamadas) {
+      vacio(llm, "Todavía no hay llamadas al LLM.");
+    } else {
+      const box = el("div");
+      const prop = el("div");
+      Object.entries(l.por_proposito).forEach(([k, v]) => prop.append(el("span", "pill", `${k === "router" ? "Decidir herramienta" : "Redactar respuesta"}: ${v}`)));
+      const errs = el("div");
+      Object.entries(l.errores).forEach(([k, v]) => errs.append(el("span", "pill bad", `${k}: ${v}`)));
+      box.append(prop);
+      if (Object.keys(l.errores).length) box.append(errs);
+      box.append(el("p", "empty", `Tiempo por llamada: promedio ${seg(l.ms_promedio)} · p95 ${seg(l.ms_p95)}`));
+      llm.replaceChildren(box);
+    }
+
+    tabla($("tools"), [
+      { titulo: "Herramienta", valor: f => f.tool },
+      { titulo: "Preguntas", num: true, valor: f => n(f.preguntas) },
+      { titulo: "Promedio", num: true, valor: f => seg(f.ms_promedio) },
+      { titulo: "p95", num: true, valor: f => seg(f.ms_p95) },
+    ], m.por_herramienta);
+
+    lista($("noent"), m.ultimas_no_entendidas, f => f.pregunta, "", "Ninguna 🎉");
+    lista($("errores"), m.errores_recientes, f => `${f.pregunta} → ${f.error}`, "err", "Sin errores.");
+    tabla($("lentas"), [
+      { titulo: "Pregunta", valor: f => f.pregunta },
+      { titulo: "Herramienta", valor: f => f.tool },
+      { titulo: "Tiempo", num: true, valor: f => seg(f.ms) },
+    ], m.mas_lentas);
+  }
+
+  cargar();
+  setInterval(cargar, 15000);
+</script>
+</body>
+</html>
