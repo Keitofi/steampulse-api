@@ -242,24 +242,51 @@ def parece_ingles(texto: str) -> bool:
     return ingles >= 2 and ingles > espanol
 
 
+ERRORES_TRADUCCION: list[str] = []   # motivo del último fallo, para diagnosticar
+
+
+def _mymemory(texto: str) -> str | None:
+    params = {"q": texto[:480], "langpair": "en|es"}
+    if os.getenv("MYMEMORY_EMAIL"):
+        params["de"] = os.getenv("MYMEMORY_EMAIL")
+    resp = requests.get("https://api.mymemory.translated.net/get", params=params, timeout=6)
+    resp.raise_for_status()
+    datos = resp.json()
+    traducido = html.unescape((datos.get("responseData") or {}).get("translatedText") or "")
+    if not traducido or "MYMEMORY WARNING" in traducido.upper() or str(datos.get("responseStatus")) not in ("200", ""):
+        raise RuntimeError(f"MyMemory: {traducido[:80] or datos.get('responseDetails')}")
+    return traducido
+
+
+def _google(texto: str) -> str | None:
+    """Endpoint público de Google Translate (el mismo que usa la extensión del navegador)."""
+    resp = requests.get(
+        "https://translate.googleapis.com/translate_a/single",
+        params={"client": "gtx", "sl": "en", "tl": "es", "dt": "t", "q": texto[:1500]},
+        timeout=6,
+    )
+    resp.raise_for_status()
+    partes = resp.json()[0] or []
+    traducido = "".join(p[0] for p in partes if p and p[0])
+    if not traducido:
+        raise RuntimeError("Google: respuesta vacía")
+    return traducido
+
+
 def _traducir_uno(texto: str) -> str:
     if not texto or not parece_ingles(texto):
         return texto
     if texto in _cache_traducciones:
         return _cache_traducciones[texto]
-    try:
-        params = {"q": texto[:480], "langpair": "en|es"}
-        if os.getenv("MYMEMORY_EMAIL"):
-            params["de"] = os.getenv("MYMEMORY_EMAIL")
-        resp = requests.get("https://api.mymemory.translated.net/get", params=params, timeout=6)
-        resp.raise_for_status()
-        traducido = html.unescape((resp.json().get("responseData") or {}).get("translatedText") or "")
-        if not traducido or "MYMEMORY WARNING" in traducido.upper() or "QUERY LENGTH LIMIT" in traducido.upper():
-            return texto   # se acabó la cuota del día o falló: se deja en inglés
-        _cache_traducciones[texto] = traducido
-        return traducido
-    except Exception:
-        return texto
+    for traductor in (_google, _mymemory):
+        try:
+            traducido = traductor(texto)
+            _cache_traducciones[texto] = traducido
+            return traducido
+        except Exception as exc:
+            ERRORES_TRADUCCION.append(f"{type(exc).__name__}: {str(exc)[:120]}")
+            del ERRORES_TRADUCCION[:-5]
+    return texto   # si ninguno funciona, se deja en inglés
 
 
 def traducir(textos: list[str]) -> list[str]:
@@ -276,6 +303,10 @@ def _traducir_noticias(noticias: list[dict]) -> list[dict]:
         n["traducido"] = traducidos[i] != (n["titulo"] or "") or traducidos[k + i] != (n["contenido"] or "")
         n["titulo"], n["contenido"] = traducidos[i], traducidos[k + i]
     return noticias
+
+
+def error_traduccion() -> str | None:
+    return ERRORES_TRADUCCION[-1] if ERRORES_TRADUCCION else None
 
 
 def get_steam_news(appid: int | None = None, max_results: int = 5) -> list[dict]:

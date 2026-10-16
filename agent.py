@@ -22,6 +22,8 @@ from steam_tools import (
     juegos_similares,
     get_steam_news,
     get_trending_games,
+    error_traduccion,
+    parece_ingles,
 )
 
 TOOLS_PERMITIDAS = {
@@ -616,7 +618,10 @@ def ejecutar_tool(decision: dict):
         if params.get("juego") and not juego:
             return {"error": f"No encontré '{params['juego']}' en Steam. Revisa el nombre o prueba con otro juego."}
         noticias = get_steam_news(appid=juego["appid"] if juego else None)
-        return {"juego": juego, "noticias": noticias}
+        resultado = {"juego": juego, "noticias": noticias}
+        if noticias and not any(n.get("traducido") for n in noticias) and any(parece_ingles(n.get("titulo") or "") for n in noticias):
+            resultado["error_traduccion"] = error_traduccion()   # para diagnosticar desde /docs
+        return resultado
     if tool == "similares":
         juego = _resolver(params.get("juego"))
         if not juego:
@@ -861,7 +866,7 @@ def _compactar(datos):
     if isinstance(datos, list):
         return [_compactar(d) for d in datos]
     if isinstance(datos, dict):
-        return {k: _compactar(v) for k, v in datos.items() if k not in ("url", "appid", "categorias", "imagen", "traducido")}
+        return {k: _compactar(v) for k, v in datos.items() if k not in ("url", "appid", "categorias", "imagen", "traducido", "error_traduccion")}
     return datos
 
 
