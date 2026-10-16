@@ -6,6 +6,7 @@ import re
 import os
 import time
 from concurrent.futures import ThreadPoolExecutor
+from urllib.parse import quote
 import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
@@ -268,7 +269,7 @@ def _mymemory(texto: str) -> str | None:
     params = {"q": texto[:480], "langpair": "en|es"}
     if os.getenv("MYMEMORY_EMAIL"):
         params["de"] = os.getenv("MYMEMORY_EMAIL")
-    resp = requests.get("https://api.mymemory.translated.net/get", params=params, timeout=6)
+    resp = requests.get("https://api.mymemory.translated.net/get", params=params, timeout=4)
     resp.raise_for_status()
     datos = resp.json()
     traducido = html.unescape((datos.get("responseData") or {}).get("translatedText") or "")
@@ -282,7 +283,7 @@ def _google(texto: str) -> str | None:
     resp = requests.get(
         "https://translate.googleapis.com/translate_a/single",
         params={"client": "gtx", "sl": "en", "tl": "es", "dt": "t", "q": texto[:1500]},
-        timeout=6,
+        timeout=4,
     )
     resp.raise_for_status()
     partes = resp.json()[0] or []
@@ -292,19 +293,38 @@ def _google(texto: str) -> str | None:
     return traducido
 
 
+def _lingva(texto: str) -> str | None:
+    """Lingva: proxy abierto de Google Translate (otro servidor, otra cuota)."""
+    resp = requests.get(f"https://lingva.ml/api/v1/en/es/{quote(texto[:900], safe='')}", timeout=4)
+    resp.raise_for_status()
+    traducido = (resp.json() or {}).get("translation")
+    if not traducido:
+        raise RuntimeError("Lingva: respuesta vacía")
+    return traducido
+
+
+# Cortacircuitos: si un traductor falla (429, timeout…), no se vuelve a intentar por 15 minutos.
+# Así no se pierden segundos esperando a un servicio que ya sabemos que nos está bloqueando.
+PAUSA_TRADUCTOR_S = 15 * 60
+_pausado_hasta: dict[str, float] = {}
+
+
 def _traducir_uno(texto: str) -> str:
     if not texto or not parece_ingles(texto):
         return texto
     if texto in _cache_traducciones:
         return _cache_traducciones[texto]
-    for traductor in (_google, _mymemory):
+    for nombre, traductor in (("google", _google), ("lingva", _lingva), ("mymemory", _mymemory)):
+        if time.time() < _pausado_hasta.get(nombre, 0):
+            continue
         try:
             traducido = traductor(texto)
             _cache_traducciones[texto] = traducido
             return traducido
         except Exception as exc:
-            ERRORES_TRADUCCION.append(f"{type(exc).__name__}: {str(exc)[:120]}")
-            del ERRORES_TRADUCCION[:-5]
+            _pausado_hasta[nombre] = time.time() + PAUSA_TRADUCTOR_S
+            ERRORES_TRADUCCION.append(f"{nombre}: {type(exc).__name__}: {str(exc)[:90]}")
+            del ERRORES_TRADUCCION[:-6]
     return texto   # si ninguno funciona, se deja en inglés
 
 
@@ -325,7 +345,15 @@ def _traducir_noticias(noticias: list[dict]) -> list[dict]:
 
 
 def error_traduccion() -> str | None:
-    return ERRORES_TRADUCCION[-1] if ERRORES_TRADUCCION else None
+    """Último error de cada traductor (google, lingva, mymemory) y cuáles están en pausa."""
+    ultimos = {}
+    for e in ERRORES_TRADUCCION:
+        ultimos[e.split(":", 1)[0]] = e
+    pausados = [n for n, t in _pausado_hasta.items() if time.time() < t]
+    if not ultimos and not pausados:
+        return None
+    texto = " | ".join(ultimos.values())
+    return texto + (f" | en pausa 15 min: {', '.join(pausados)}" if pausados else "")
 
 
 def get_steam_news(appid: int | None = None, max_results: int = 5) -> list[dict]:
