@@ -212,7 +212,11 @@ SIN_JUEGO = {"steam", "hoy", "la semana", "esta semana", "ahora", "semana", "est
 def _juego_de_noticias(p: str) -> str | None:
     m = re.search(r"(?:\btuvo\b|\btiene\b|\bsobre\b|\bdel\b|\bde\b|\bpara\b)\s+(?:el\s+|la\s+)?(.+)$", p, re.IGNORECASE)
     if m:
-        nombre = _limpiar_nombre(m.group(1))
+        # "qué hay de noticias de terraria" → quitar "noticias de" que quedó al inicio
+        palabras = _limpiar_nombre(m.group(1)).split()
+        while palabras and palabras[0].lower().strip("¿?¡!.,") in RELLENO_NOTICIAS:
+            palabras.pop(0)
+        nombre = _limpiar_nombre(" ".join(palabras))
         if nombre and nombre.lower() not in SIN_JUEGO:
             return nombre
     # Con errores de dedo ("qué noticias hay e minecraft"): lo que sobra al quitar las palabras de relleno
