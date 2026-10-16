@@ -907,6 +907,9 @@ def formatear_sin_llm(datos) -> str:
                 lineas.append(f"  {n['contenido'][:200]}…")
         if any(n.get("traducido") for n in datos["noticias"]):
             lineas.append("\n(Traducción automática del inglés)")
+        elif any(parece_ingles(n.get("titulo") or "") for n in datos["noticias"]):
+            lineas.append("\n(Las noticias vienen en inglés, tal como las publica el desarrollador en Steam. "
+                          "En este momento no pude traducirlas.)")
         sugerencia = "¿y de otro juego? (por ejemplo: ¿y de Dota 2?)"
     elif isinstance(datos, dict) and "juego1" in datos:
         lineas.append("Comparación:")

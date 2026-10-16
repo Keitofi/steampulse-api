@@ -262,7 +262,7 @@ def parece_ingles(texto: str) -> bool:
     return ingles >= 2 and ingles > espanol
 
 
-ERRORES_TRADUCCION: list[str] = []   # motivo del último fallo, para diagnosticar
+ERRORES_TRADUCCION: dict[str, str] = {}   # último error de cada traductor, para diagnosticar
 
 
 def _mymemory(texto: str) -> str | None:
@@ -323,8 +323,7 @@ def _traducir_uno(texto: str) -> str:
             return traducido
         except Exception as exc:
             _pausado_hasta[nombre] = time.time() + PAUSA_TRADUCTOR_S
-            ERRORES_TRADUCCION.append(f"{nombre}: {type(exc).__name__}: {str(exc)[:90]}")
-            del ERRORES_TRADUCCION[:-6]
+            ERRORES_TRADUCCION[nombre] = f"{nombre}: {type(exc).__name__}: {str(exc)[:90]}"
     return texto   # si ninguno funciona, se deja en inglés
 
 
@@ -344,11 +343,14 @@ def _traducir_noticias(noticias: list[dict]) -> list[dict]:
     return noticias
 
 
+def traduccion_disponible() -> bool:
+    """False si todos los traductores están en pausa (bloqueados)."""
+    return any(time.time() >= _pausado_hasta.get(n, 0) for n in ("google", "lingva", "mymemory"))
+
+
 def error_traduccion() -> str | None:
     """Último error de cada traductor (google, lingva, mymemory) y cuáles están en pausa."""
-    ultimos = {}
-    for e in ERRORES_TRADUCCION:
-        ultimos[e.split(":", 1)[0]] = e
+    ultimos = dict(ERRORES_TRADUCCION)
     pausados = [n for n, t in _pausado_hasta.items() if time.time() < t]
     if not ultimos and not pausados:
         return None
