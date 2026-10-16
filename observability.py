@@ -72,6 +72,7 @@ def registrar_pregunta(resultado: dict) -> None:
         "router": resultado.get("router"),
         "status": resultado.get("status"),
         "llm_usado": resultado.get("llm_usado"),
+        "desde_cache": resultado.get("desde_cache", False),
         "ms_total": (resultado.get("limites") or {}).get("tiempo_total_ms")
                     or sum(p["ms"] for p in resultado.get("trace", [])),
         "pasos": resultado.get("trace", []),
@@ -105,6 +106,10 @@ def _tipo_paso(nombre: str) -> str:
         return "Redactar con LLM"
     if nombre.startswith("fallback"):
         return "Redactar sin LLM (respaldo)"
+    if nombre == "formato_fijo":
+        return "Formato fijo (sin LLM, a propósito)"
+    if nombre.startswith("cache") or nombre == "respuesta_en_cache":
+        return "Caché"
     return nombre
 
 
@@ -148,6 +153,7 @@ def metricas(estado_llm: dict | None = None) -> dict:
             "con_error_de_steam": sum(1 for e in eventos if e["status"] == "error_tool"),
             "rechazadas_por_limite": contadores.get("rechazada_por_limite", 0),
             "respuesta_con_llm": sum(1 for e in eventos if e["llm_usado"]),
+            "desde_cache": sum(1 for e in eventos if e.get("desde_cache")),
             "respuesta_sin_llm": sum(1 for e in eventos if not e["llm_usado"] and e["tool"] != "none"),
         },
         "tiempo": {

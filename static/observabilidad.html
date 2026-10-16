@@ -146,7 +146,7 @@
     const sinLLM = p.total ? Math.round(100 * p.resueltas_por_reglas / p.total) : 0;
     const pres = l.presupuesto_hoy;
     $("kpis").replaceChildren(
-      kpi("Preguntas", n(p.total), `${n(p.no_entendidas)} no entendidas`),
+      kpi("Preguntas", n(p.total), `${n(p.no_entendidas)} no entendidas · ${n(p.desde_cache || 0)} desde caché`),
       kpi("Resueltas por reglas", sinLLM + "%", "sin gastar el LLM para decidir"),
       kpi("Llamadas al LLM", n(l.llamadas), `${n(l.exitosas)} ok · ${n(l.fallidas)} fallidas`),
       kpi("Tokens del LLM", n(l.tokens_entrada + l.tokens_salida), (l.tokens_son_estimados ? "≈ estimados · " : "") + `${n(l.tokens_entrada)} entrada · ${n(l.tokens_salida)} salida`),

@@ -4,6 +4,7 @@ import difflib
 import json
 import os
 import re
+import threading
 import time
 import uuid
 
@@ -83,11 +84,73 @@ def _extract_text(data) -> str | None:
     return None
 
 
+# ---------------- Optimización de costo ----------------
+# 1) Caché: la misma consulta a Steam y su respuesta del LLM se reutilizan por un rato.
+CACHE_TTL_S = {
+    "get_best_deals": 600, "get_trending_games": 600, "top_juegos": 900, "buscar_por_genero": 900,
+    "precios": 900, "get_steam_news": 1800, "info_juego": 1800, "compare_games": 1800, "similares": 3600,
+}
+_cache: dict[str, tuple[float, object]] = {}
+_cache_lock = threading.Lock()
+
+
+def _clave_cache(tipo: str, decision: dict) -> str:
+    return f"{tipo}:{decision.get('tool')}:{json.dumps(decision.get('params') or {}, sort_keys=True, ensure_ascii=False)}"
+
+
+def cache_get(tipo: str, decision: dict):
+    ttl = CACHE_TTL_S.get(decision.get("tool"))
+    if not ttl:
+        return None
+    with _cache_lock:
+        item = _cache.get(_clave_cache(tipo, decision))
+    if item and time.time() - item[0] < ttl:
+        return item[1]
+    return None
+
+
+def cache_set(tipo: str, decision: dict, valor) -> None:
+    if decision.get("tool") not in CACHE_TTL_S or valor is None:
+        return
+    if isinstance(valor, dict) and valor.get("error"):
+        return   # los errores no se guardan
+    with _cache_lock:
+        if len(_cache) > 500:   # tope de memoria
+            _cache.clear()
+        _cache[_clave_cache(tipo, decision)] = (time.time(), valor)
+
+
+# 2) El LLM solo redacta donde aporta (resumir noticias, comparar, recomendar).
+#    Ofertas, precios, listas y fichas salen bien con el formato fijo y no gastan créditos.
+LLM_PARA = {t.strip() for t in os.getenv("LLM_PARA", "get_steam_news,compare_games,similares").split(",") if t.strip()}
+
+# 3) Pedirle a GPT-5 que razone poco (cada respuesta tardaba ~17 s por el razonamiento oculto)
+LLM_REASONING = os.getenv("LLM_REASONING", "low")
+_acepta_reasoning = [True]
+
+# 4) Cortacircuitos del LLM: sin créditos (403) → pausa 30 min; servidor caído (5xx) → pausa 3 min
+_llm_pausa = {"hasta": 0.0, "motivo": ""}
+
+
+def _pausar_llm(segundos: int, motivo: str) -> None:
+    _llm_pausa["hasta"], _llm_pausa["motivo"] = time.time() + segundos, motivo
+
+
+def llm_en_pausa() -> str | None:
+    if time.time() < _llm_pausa["hasta"]:
+        minutos = max(1, round((_llm_pausa["hasta"] - time.time()) / 60))
+        return f"LLM en pausa ~{minutos} min ({_llm_pausa['motivo']})"
+    return None
+
+
 def call_llm(system_prompt: str, prompt: str, max_tokens: int = 600, proposito: str = "respuesta") -> str:
     base_url = os.getenv("BASE_URL", "https://api.artesaniadigital.org").rstrip("/")
     api_key = os.getenv("API_KEY")
     if not api_key:
         raise RuntimeError("Falta la variable API_KEY")
+    pausa = llm_en_pausa()
+    if pausa:
+        raise RuntimeError(pausa)   # no se gasta tiempo ni créditos en un LLM que sabemos que va a fallar
 
     payload = {
         "model": "gpt-5",
@@ -100,6 +163,8 @@ def call_llm(system_prompt: str, prompt: str, max_tokens: int = 600, proposito: 
         "temperature": 1,
         "max_tokens": max_tokens,
     }
+    if LLM_REASONING and _acepta_reasoning[0]:
+        payload["reasoning_effort"] = LLM_REASONING
     headers = {"X-Student-Key": api_key, "Content-Type": "application/json"}
 
     tokens_prompt = estimar_tokens(system_prompt) + estimar_tokens(prompt)
@@ -119,10 +184,21 @@ def call_llm(system_prompt: str, prompt: str, max_tokens: int = 600, proposito: 
         ms = round((time.perf_counter() - inicio) * 1000)
         if not resp.ok:
             registrar_llamada_llm(proposito, ms, resp.status_code, tokens_prompt, 0, True, resp.text[:150])
+        # Si el backend no acepta reasoning_effort, se quita y se repite una vez (sin contar como reintento)
+        if resp.status_code in (400, 422) and "reasoning_effort" in payload:
+            _acepta_reasoning[0] = False
+            payload.pop("reasoning_effort")
+            consumir_llamada_llm()
+            resp = requests.post(f"{base_url}/v1/completions", headers=headers, json=payload, timeout=90)
+            ms = round((time.perf_counter() - inicio) * 1000)
         if resp.status_code < 500 or intento == 1:
             break
         time.sleep(2)
 
+    if resp.status_code == 403 and "credit" in resp.text.lower():
+        _pausar_llm(30 * 60, "sin créditos")
+    elif resp.status_code >= 500:
+        _pausar_llm(3 * 60, f"servidor del LLM con error {resp.status_code}")
     resp.raise_for_status()
     data = resp.json()
     text = _extract_text(data)
@@ -517,7 +593,7 @@ Si la pregunta es un seguimiento, usa la pregunta anterior para entenderla."""
             f"Pregunta actual: {pregunta}"
         )
     try:
-        texto = call_llm(system_prompt, entrada, max_tokens=1000, proposito="router")
+        texto = call_llm(system_prompt, entrada, max_tokens=600, proposito="router")
         match = re.search(r"\{.*\}", texto, re.DOTALL)
         decision = json.loads(match.group(0)) if match else {}
         if decision.get("tool") in TOOLS_PERMITIDAS and decision["tool"] != "none":
@@ -945,6 +1021,7 @@ def generar_respuesta(pregunta: str, datos, contexto: dict | None = None) -> tup
 Responde en español, de forma clara y amigable.
 Usa ÚNICAMENTE los datos proporcionados; no inventes cifras ni causas.
 Si los datos no alcanzan para responder, dilo explícitamente.
+Sé breve: máximo 150 palabras. No razones de más: solo resume los datos.
 Al final sugiere en una línea qué más puede preguntar (ofertas, géneros, noticias o comparar juegos)."""
     anterior = f"Pregunta anterior: {contexto.get('pregunta')}\n" if contexto else ""
     prompt = (
@@ -952,7 +1029,7 @@ Al final sugiere en una línea qué más puede preguntar (ofertas, géneros, not
         f"Datos de Steam: {json.dumps(_compactar(datos), ensure_ascii=False, default=str)}"
     )
     try:
-        return call_llm(system_prompt, prompt, max_tokens=2000, proposito="respuesta"), True, None
+        return call_llm(system_prompt, prompt, max_tokens=1200, proposito="respuesta"), True, None
     except PresupuestoAgotado as exc:
         return formatear_sin_llm(datos), False, str(exc)
     except requests.HTTPError as exc:
@@ -1005,20 +1082,33 @@ def _steampulse(pregunta: str, contexto: dict | None = None) -> dict:
     decision, origen = decidir_tool(expandir_alias(pregunta), contexto)
     paso(f"router:{origen}:{decision['tool']}", t)
 
-    # 3. Ejecutar herramienta
-    datos, error = None, None
+    # 3. Ejecutar herramienta (o reutilizar el resultado si ya está en caché)
+    datos, error, desde_cache = None, None, False
     if decision["tool"] != "none":
         t = time.perf_counter()
-        try:
-            datos = ejecutar_tool(decision)
-        except Exception as exc:
-            error = f"{type(exc).__name__}: {exc}"
-        paso(f"tool:{decision['tool']}", t)
+        datos = cache_get("datos", decision)
+        if datos is not None:
+            desde_cache = True
+            paso(f"cache:{decision['tool']}", t)
+        else:
+            try:
+                datos = ejecutar_tool(decision)
+                cache_set("datos", decision, datos)
+            except Exception as exc:
+                error = f"{type(exc).__name__}: {exc}"
+            paso(f"tool:{decision['tool']}", t)
 
     # 4. Generar respuesta
     t = time.perf_counter()
     error_llm = None
-    if error:
+    respuesta_guardada = cache_get("respuesta", decision) if not error else None
+    if respuesta_guardada:
+        respuesta, llm_usado = respuesta_guardada, False
+        desde_cache = True
+    elif decision["tool"] == "none" or decision["tool"] not in LLM_PARA:
+        # Respuestas con formato fijo: no gastan créditos
+        respuesta, llm_usado = formatear_sin_llm(datos), False
+    elif error:
         respuesta, llm_usado = "Steam no respondió en este momento. Intenta de nuevo en unos minutos.", False
     elif time.perf_counter() - inicio_total > TIEMPO_MAX_PARA_LLM:
         # Límite de tiempo total: si ya tardamos mucho, no esperamos además al LLM
@@ -1026,7 +1116,16 @@ def _steampulse(pregunta: str, contexto: dict | None = None) -> dict:
         error_llm = f"Se omitió el LLM: la pregunta ya llevaba más de {TIEMPO_MAX_PARA_LLM:.0f} s"
     else:
         respuesta, llm_usado, error_llm = generar_respuesta(pregunta, datos, contexto)
-    paso("llm" if llm_usado else "fallback_sin_llm", t)
+        if llm_usado:
+            cache_set("respuesta", decision, respuesta)
+    if respuesta_guardada:
+        paso("respuesta_en_cache", t)
+    elif llm_usado:
+        paso("llm", t)
+    elif decision["tool"] == "none" or decision["tool"] not in LLM_PARA:
+        paso("formato_fijo", t)
+    else:
+        paso("fallback_sin_llm", t)
 
     return {
         "request_id": request_id,
@@ -1035,6 +1134,7 @@ def _steampulse(pregunta: str, contexto: dict | None = None) -> dict:
         "params": decision.get("params", {}),
         "router": origen,
         "llm_usado": llm_usado,
+        "desde_cache": desde_cache,
         "status": "error_tool" if error else "completed",
         "error": error,
         "error_llm": error_llm,
