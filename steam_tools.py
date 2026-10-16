@@ -3,9 +3,12 @@
 import html
 import json
 import re
+import os
 import time
+from concurrent.futures import ThreadPoolExecutor
 import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from zoneinfo import ZoneInfo
 
 import requests
@@ -67,6 +70,9 @@ def limpiar_texto(texto: str | None, limite: int = 300) -> str:
     texto = html.unescape(texto)
     texto = re.sub(r"<[^>]+>", " ", texto)
     texto = re.sub(r"\[/?[a-zA-Z0-9_=\"' ]*\]", " ", texto)
+    # Imágenes y videos incrustados en los anuncios: {STEAM_CLAN_IMAGE}/123/abc.png, links a .png/.jpg/.gif
+    texto = re.sub(r"\{STEAM_[A-Z_]+\}\S*", " ", texto)
+    texto = re.sub(r"https?://\S+?\.(?:png|jpe?g|gif|webp|mp4|webm)\S*", " ", texto, flags=re.IGNORECASE)
     texto = texto.replace("\\", " ")
     # Las notas de parche vienen pegadas ("kitsReduced"): separa las frases
     texto = re.sub(r"([a-z\)])([A-Z])", r"\1. \2", texto)
@@ -135,6 +141,8 @@ def get_game_details(appid: int) -> dict | None:
         "categorias": [c["description"] for c in d.get("categories", [])],
         "idiomas": limpiar_texto(d.get("supported_languages"), 400).replace("*", "").replace(" idiomas con localización de audio", ""),
         "plataformas": [p for p, ok in (d.get("platforms") or {}).items() if ok],
+        "imagen": d.get("header_image"),
+        "url": f"https://store.steampowered.com/app/{appid}/",
         "requisitos_minimos": _requisitos(d, "minimum"),
         "requisitos_recomendados": _requisitos(d, "recommended"),
     }
@@ -201,6 +209,75 @@ def compare_games(appid1: int, appid2: int) -> dict:
     return {"juego1": juego1, "juego2": juego2}
 
 
+URL_IMAGENES_CLAN = "https://clan.akamai.steamstatic.com/images"
+
+
+def primera_imagen(texto: str | None) -> str | None:
+    """Saca la primera imagen de un anuncio: {STEAM_CLAN_IMAGE}/…png, <img src=…> o un link directo a imagen."""
+    if not texto:
+        return None
+    m = re.search(r"\{STEAM_CLAN_IMAGE\}(/\S+?\.(?:png|jpe?g|gif|webp))", texto, re.IGNORECASE)
+    if m:
+        return URL_IMAGENES_CLAN + m.group(1)
+    m = re.search(r"<img[^>]+src=[\"']([^\"']+)", texto, re.IGNORECASE)
+    if m and m.group(1).startswith("http"):
+        return m.group(1)
+    m = re.search(r"https?://\S+?\.(?:png|jpe?g|gif|webp)", texto, re.IGNORECASE)
+    return m.group(0) if m else None
+
+
+# ---------------- Traducción (sin gastar el LLM) ----------------
+# MyMemory: API gratuita de traducción. Sin correo da ~5,000 caracteres al día;
+# con MYMEMORY_EMAIL en las variables de Render sube a ~50,000.
+_cache_traducciones: dict[str, str] = {}
+_INGLES = {"the", "and", "you", "of", "to", "is", "are", "for", "with", "this", "our", "we", "new", "now",
+           "out", "update", "your", "will", "has", "have", "on", "in", "from", "be", "it", "at", "all"}
+_ESPANOL = {"el", "la", "los", "las", "de", "del", "que", "y", "en", "para", "con", "una", "por", "ya", "nuevo", "es"}
+
+
+def parece_ingles(texto: str) -> bool:
+    palabras = re.findall(r"[a-záéíóúñ]+", texto.lower())
+    ingles = sum(w in _INGLES for w in palabras)
+    espanol = sum(w in _ESPANOL for w in palabras)
+    return ingles >= 2 and ingles > espanol
+
+
+def _traducir_uno(texto: str) -> str:
+    if not texto or not parece_ingles(texto):
+        return texto
+    if texto in _cache_traducciones:
+        return _cache_traducciones[texto]
+    try:
+        params = {"q": texto[:480], "langpair": "en|es"}
+        if os.getenv("MYMEMORY_EMAIL"):
+            params["de"] = os.getenv("MYMEMORY_EMAIL")
+        resp = requests.get("https://api.mymemory.translated.net/get", params=params, timeout=6)
+        resp.raise_for_status()
+        traducido = html.unescape((resp.json().get("responseData") or {}).get("translatedText") or "")
+        if not traducido or "MYMEMORY WARNING" in traducido.upper() or "QUERY LENGTH LIMIT" in traducido.upper():
+            return texto   # se acabó la cuota del día o falló: se deja en inglés
+        _cache_traducciones[texto] = traducido
+        return traducido
+    except Exception:
+        return texto
+
+
+def traducir(textos: list[str]) -> list[str]:
+    """Traduce al español los textos que estén en inglés (en paralelo). Si falla, regresa el original."""
+    with ThreadPoolExecutor(max_workers=6) as pool:
+        return list(pool.map(_traducir_uno, textos))
+
+
+def _traducir_noticias(noticias: list[dict]) -> list[dict]:
+    textos = [n["titulo"] or "" for n in noticias] + [n["contenido"] or "" for n in noticias]
+    traducidos = traducir(textos)
+    k = len(noticias)
+    for i, n in enumerate(noticias):
+        n["traducido"] = traducidos[i] != (n["titulo"] or "") or traducidos[k + i] != (n["contenido"] or "")
+        n["titulo"], n["contenido"] = traducidos[i], traducidos[k + i]
+    return noticias
+
+
 def get_steam_news(appid: int | None = None, max_results: int = 5) -> list[dict]:
     """Noticias recientes de un juego, o de Steam en general si no hay appid."""
     if appid:
@@ -220,14 +297,15 @@ def get_steam_news(appid: int | None = None, max_results: int = 5) -> list[dict]
             fecha = item.get("date")
             noticias.append({
                 "titulo": item.get("title"),
-                "contenido": limpiar_texto(item.get("contents")),
+                "contenido": limpiar_texto(item.get("contents"), 250),
+                "imagen": primera_imagen(item.get("contents")),
                 "fecha": (
                     datetime.fromtimestamp(fecha, tz=timezone.utc).strftime("%Y-%m-%d")
                     if fecha else None
                 ),
                 "url": item.get("url"),
             })
-        return noticias
+        return _traducir_noticias(noticias)
 
     resp = requests.get(
         "https://store.steampowered.com/feeds/news/",
@@ -236,15 +314,20 @@ def get_steam_news(appid: int | None = None, max_results: int = 5) -> list[dict]
     )
     resp.raise_for_status()
     root = ET.fromstring(resp.content)
-    return [
-        {
+    noticias = []
+    for item in root.findall(".//item")[:max_results]:
+        try:
+            fecha = parsedate_to_datetime(item.findtext("pubDate")).strftime("%Y-%m-%d")
+        except Exception:
+            fecha = item.findtext("pubDate")
+        noticias.append({
             "titulo": item.findtext("title"),
-            "contenido": limpiar_texto(item.findtext("description")),
-            "fecha": item.findtext("pubDate"),
+            "contenido": limpiar_texto(item.findtext("description"), 250),
+            "imagen": primera_imagen(item.findtext("description")),
+            "fecha": fecha,
             "url": item.findtext("link"),
-        }
-        for item in root.findall(".//item")[:max_results]
-    ]
+        })
+    return _traducir_noticias(noticias)
 
 
 def get_review_summary(appid: int) -> dict | None:

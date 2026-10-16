@@ -834,6 +834,8 @@ def formatear_sin_llm(datos) -> str:
             lineas.append(f"• {n['titulo']}{fecha}")
             if n.get("contenido"):
                 lineas.append(f"  {n['contenido'][:200]}…")
+        if any(n.get("traducido") for n in datos["noticias"]):
+            lineas.append("\n(Traducción automática del inglés)")
         sugerencia = "¿y de otro juego? (por ejemplo: ¿y de Dota 2?)"
     elif isinstance(datos, dict) and "juego1" in datos:
         lineas.append("Comparación:")
@@ -859,7 +861,7 @@ def _compactar(datos):
     if isinstance(datos, list):
         return [_compactar(d) for d in datos]
     if isinstance(datos, dict):
-        return {k: _compactar(v) for k, v in datos.items() if k not in ("url", "appid", "categorias")}
+        return {k: _compactar(v) for k, v in datos.items() if k not in ("url", "appid", "categorias", "imagen", "traducido")}
     return datos
 
 
