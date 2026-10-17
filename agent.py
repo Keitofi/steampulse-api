@@ -30,6 +30,7 @@ from steam_tools import (
 )
 
 TOOLS_PERMITIDAS = {
+    "saludo",
     "get_trending_games",
     "get_best_deals",
     "compare_games",
@@ -452,7 +453,7 @@ PATRONES_ATRIBUTO = [
     # qué dicen los usuarios de DbD / reseñas de Elden Ring / opiniones sobre Hades
     re.compile(r"(?:qu[eé]\s+(?:dicen|opinan|piensan|comentan|tal\s+(?:las\s+)?(?:rese[ñn]as|opiniones|cr[ií]ticas))"
                r"(?:\s+(?:los|las|la)\s+(?:usuarios|jugadores|gamers|personas|gente|rese[ñn]as|comunidad))?"
-               r"|opiniones?|rese[ñn]as?|comentarios|cr[ií]ticas)\s+(?:de|del|sobre|acerca\s+de|en)\s+(?:el\s+|la\s+)?(.+)", re.IGNORECASE),
+               r"|opiniones?|rese[ñn]as?|comentarios|cr[ií]ticas)\s+(?:de|del|sobre|acerca\s+del?|en)\s+(?:el\s+|la\s+)?(.+)", re.IGNORECASE),
     # en qué idiomas está Danganronpa / idiomas de X
     re.compile(r"qu[eé]\s+idiomas?\s+(?:est[aá]|viene|tiene|trae|se puede jugar|hay)\s+(?:en\s+)?(?:el\s+|la\s+)?(.+)", re.IGNORECASE),
     re.compile(r"idiomas?\s+(?:de|del|tiene|trae)\s+(?:el\s+|la\s+)?(.+)", re.IGNORECASE),
@@ -476,11 +477,34 @@ def _juego_con_atributo(pregunta: str) -> str | None:
     return None
 
 
+PATRON_SALUDO = re.compile(
+    r"^\W*(?:hola|holi|hey|buenas(?:\s+(?:tardes|noches))?|buen(?:os)?\s+d[ií]as|qu[eé]\s+onda|"
+    r"(?:muchas\s+)?gracias|adi[oó]s|bye|ayuda|help)"
+    r"(?:\s+(?:qu[eé]\s+tal|c[oó]mo\s+est[aá]s|steampulse|amigo|bot))?\W*$",
+    re.IGNORECASE,
+)
+
+
+def respuesta_saludo(pregunta: str) -> str:
+    p = pregunta.lower()
+    if "gracias" in p:
+        return "¡De nada! Si quieres, pregúntame por otro juego, ofertas o noticias."
+    if "adi" in p or "bye" in p:
+        return "¡Hasta luego! Aquí estaré cuando quieras revisar ofertas o juegos."
+    return ("¡Hola! Soy SteamPulse. Pregúntame sobre juegos de Steam, por ejemplo:\n"
+            "• ¿Qué ofertas de más del 50% hay?\n"
+            "• ¿Elden Ring es cooperativo?\n"
+            "• ¿Qué dicen los usuarios de Dead by Daylight?\n"
+            "• Me gustó Hollow Knight, ¿qué más me puede gustar?")
+
+
 def decidir_por_reglas(pregunta: str, contexto: dict | None = None) -> dict:
     """Router determinista: resuelve la mayoría de preguntas sin gastar tokens.
 
     `contexto` es la pregunta anterior ({pregunta, tool, params}) para seguimientos.
     """
+    if PATRON_SALUDO.match(pregunta):
+        return {"tool": "saludo", "params": {}}
     p = pregunta.lower()
     previo = (contexto or {}).get("tool")
     params_previos = (contexto or {}).get("params") or {}
@@ -701,7 +725,17 @@ def _resolver(nombre: str | None) -> dict | None:
         return None
     nombre = RELLENO.sub("", _limpiar_nombre(nombre)).strip() or nombre   # "el juego restory" → "restory"
     nombre = _quitar_relleno_final(nombre) or nombre                       # "terraria hay" → "terraria"
-    return buscar_tolerante(nombre)
+    encontrado = buscar_tolerante(nombre)
+    if encontrado and _parece_el_juego(nombre, encontrado["nombre"] or ""):
+        return encontrado
+    # "el quinto reto de The Escapists 3" → "The Escapists 3"
+    partes = re.split(r"\s+(?:de|del)\s+", nombre, flags=re.IGNORECASE)
+    if len(partes) > 1 and partes[-1].strip():
+        cola = _limpiar_nombre(partes[-1])
+        otro = buscar_tolerante(cola)
+        if otro and _parece_el_juego(cola, otro["nombre"] or ""):
+            return otro
+    return encontrado
 
 
 # Juegos famosos que NO están en Steam: mejor decirlo que mostrar otro juego parecido
@@ -781,6 +815,12 @@ def ejecutar_tool(decision: dict):
         if not info:
             return {"error": f"No pude obtener la ficha de {juego['nombre']}."}
         info["buscado"] = params.get("juego")
+        buscado = RELLENO.sub("", _limpiar_nombre(str(params.get("juego") or ""))).strip()
+        partes = re.split(r"\s+(?:de|del)\s+", buscado, flags=re.IGNORECASE)
+        if len(partes) > 1 and not _parece_el_juego(buscado, info.get("nombre") or ""):
+            # Pidió algo dentro del juego ("el quinto reto de X"): se aclara qué se muestra
+            info["nota"] = (f"No puedo buscar opiniones sobre «{' de '.join(partes[:-1])}» en específico; "
+                            f"esto es lo que dicen en general de {info.get('nombre')}.")
         if params.get("atributo") and any(w in params["atributo"].lower() for w in PIDE_OPINION):
             try:
                 info["resenas_destacadas"] = get_resenas_destacadas(juego["appid"])
@@ -920,6 +960,8 @@ def formatear_sin_llm(datos) -> str:
             lineas.append(f"• {j['nombre']} — {precio}")
         sugerencia = f"¿Sabes de {datos['resultados'][0]['nombre']}?"
     elif isinstance(datos, dict) and datos.get("respuesta_atributo"):
+        if datos.get("nota"):
+            lineas.append(datos["nota"] + "\n")
         lineas.append(datos["respuesta_atributo"])
         sugerencia = f"¿tiene español?, ¿está en oferta?, ¿es multijugador? (sobre {datos['nombre']})"
     elif isinstance(datos, dict) and "jugadores_ahora" in datos:
@@ -1130,6 +1172,8 @@ def _steampulse(pregunta: str, contexto: dict | None = None) -> dict:
     if respuesta_guardada:
         respuesta, llm_usado = respuesta_guardada, False
         desde_cache = True
+    elif decision["tool"] == "saludo":
+        respuesta, llm_usado = respuesta_saludo(pregunta), False
     elif decision["tool"] == "none" or decision["tool"] not in LLM_PARA:
         # Respuestas con formato fijo: no gastan créditos
         respuesta, llm_usado = formatear_sin_llm(datos), False
