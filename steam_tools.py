@@ -430,6 +430,36 @@ def get_review_summary(appid: int) -> dict | None:
     }
 
 
+def get_resenas_destacadas(appid: int, cantidad: int = 4) -> list[dict]:
+    """Lo que dicen los jugadores: reseñas útiles de Steam (primero en español), mitad positivas y mitad negativas."""
+    for idioma in ("spanish", "latam", "english"):
+        try:
+            resp = requests.get(
+                f"https://store.steampowered.com/appreviews/{appid}",
+                params={"json": 1, "language": idioma, "filter": "all", "purchase_type": "all",
+                        "num_per_page": 30, "day_range": 365},
+                timeout=TIMEOUT,
+            )
+            if not resp.ok:
+                continue
+            reseñas = []
+            for r in resp.json().get("reviews", []):
+                texto = limpiar_texto(r.get("review"), 230)
+                if len(texto) < 40:
+                    continue   # fuera reseñas de una palabra o puro emoji
+                horas = round(((r.get("author") or {}).get("playtime_forever") or 0) / 60)
+                reseñas.append({"positiva": bool(r.get("voted_up")), "texto": texto, "horas": horas,
+                                "utiles": r.get("votes_up", 0), "idioma": idioma})
+            if len(reseñas) >= 2:
+                positivas = [r for r in reseñas if r["positiva"]][: (cantidad + 1) // 2]
+                negativas = [r for r in reseñas if not r["positiva"]][: cantidad // 2]
+                elegidas = positivas + negativas
+                return elegidas or reseñas[:cantidad]
+        except Exception:
+            continue
+    return []
+
+
 def buscar_juegos(
     genero: str | None = None,
     solo_ofertas: bool = False,

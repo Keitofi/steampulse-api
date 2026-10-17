@@ -21,6 +21,7 @@ from steam_tools import (
     compare_games,
     get_best_deals,
     get_game_info,
+    get_resenas_destacadas,
     juegos_similares,
     get_steam_news,
     get_trending_games,
@@ -440,13 +441,18 @@ def _juego_para_similares(pregunta: str) -> str | None:
 PALABRAS_ATRIBUTO = ["multijugador", "multiplayer", "cooperativ", "co-op", "coop", "online", "en línea", "en linea",
                      "pvp", "español", "espanol", "idioma", "subtítulo", "subtitulo", "doblaje", "doblado",
                      "mando", "control", "gamepad", "mac", "linux", "steam deck", "gratis", "free to play",
-                     "requisito", "requerimiento", "specs", "bueno", "vale la pena", "jugadores", "un jugador"]
+                     "requisito", "requerimiento", "specs", "bueno", "buenas", "vale la pena", "jugadores", "un jugador",
+                     "reseña", "resena", "opinion", "opinión", "critica", "crítica"]
 NO_ES_JUEGO = re.compile(r"^(?:qu[eé]|cu[aá]l|cu[aá]les|hay|alg[uú]n|alguno|algo|juegos?|un juego|el juego|este|ese|esto|eso|y|me|mi|si|s[ií])\b", re.IGNORECASE)
 PATRONES_ATRIBUTO = [
     # requisitos mínimos del sistema de Undertale / specs de Elden Ring / qué pc necesito para X
     re.compile(r"(?:requisitos|requerimientos|specs|especificaciones)(?:\s+(?:m[ií]nimos|recomendados|t[eé]cnicos))?"
                r"(?:\s+(?:del?\s+)?(?:sistema|pc|computadora))?\s+(?:de|del|para|pide|necesita|ocupa)\s+(?:jugar\s+)?(?:el\s+|la\s+)?(.+)", re.IGNORECASE),
     re.compile(r"(?:pc|computadora|compu)\s+(?:necesito|ocupo|se necesita|pide)\s+para\s+(?:jugar\s+|correr\s+)?(?:el\s+|la\s+)?(.+)", re.IGNORECASE),
+    # qué dicen los usuarios de DbD / reseñas de Elden Ring / opiniones sobre Hades
+    re.compile(r"(?:qu[eé]\s+(?:dicen|opinan|piensan|comentan|tal\s+(?:las\s+)?(?:rese[ñn]as|opiniones|cr[ií]ticas))"
+               r"(?:\s+(?:los|las|la)\s+(?:usuarios|jugadores|gamers|personas|gente|rese[ñn]as|comunidad))?"
+               r"|opiniones?|rese[ñn]as?|comentarios|cr[ií]ticas)\s+(?:de|del|sobre|acerca\s+de|en)\s+(?:el\s+|la\s+)?(.+)", re.IGNORECASE),
     # en qué idiomas está Danganronpa / idiomas de X
     re.compile(r"qu[eé]\s+idiomas?\s+(?:est[aá]|viene|tiene|trae|se puede jugar|hay)\s+(?:en\s+)?(?:el\s+|la\s+)?(.+)", re.IGNORECASE),
     re.compile(r"idiomas?\s+(?:de|del|tiene|trae)\s+(?:el\s+|la\s+)?(.+)", re.IGNORECASE),
@@ -775,6 +781,11 @@ def ejecutar_tool(decision: dict):
         if not info:
             return {"error": f"No pude obtener la ficha de {juego['nombre']}."}
         info["buscado"] = params.get("juego")
+        if params.get("atributo") and any(w in params["atributo"].lower() for w in PIDE_OPINION):
+            try:
+                info["resenas_destacadas"] = get_resenas_destacadas(juego["appid"])
+            except Exception:
+                info["resenas_destacadas"] = []
         if params.get("atributo"):
             info["respuesta_atributo"] = _responder_atributo(params["atributo"], info)
         return info
@@ -790,6 +801,9 @@ def ejecutar_tool(decision: dict):
             min_descuento=int(params.get("min_descuento") or 0),
         )
     return None
+
+
+PIDE_OPINION = ["dicen", "opinan", "piensan", "comentan", "comentario", "reseña", "resena", "opinion", "opinión", "crític", "critic"]
 
 
 def _tiene_categoria(info: dict, claves: list[str]) -> list[str]:
@@ -852,12 +866,23 @@ def _responder_atributo(pregunta: str, info: dict) -> str | None:
             return f"Ahorita hay {n:,} personas jugando {nombre}." if isinstance(n, int) else "No pude obtener los jugadores actuales."
         return f"{nombre} cuesta {info['precio']}."
 
-    if any(w in p for w in ["bueno", "vale la pena", "reseña", "resena", "calificaci", "opinion", "opinión", "recomend", "malo"]):
+    if any(w in p for w in ["bueno", "buenas", "vale la pena", "calificaci", "recomend", "malo"] + PIDE_OPINION):
         r = info.get("resenas")
         if not r:
             return f"{nombre} todavía no tiene suficientes reseñas en Steam."
-        veredicto = "muy bien valorado" if r["porcentaje_positivas"] >= 80 else "con opiniones mixtas" if r["porcentaje_positivas"] >= 60 else "mal valorado"
-        return f"{nombre} está {veredicto}: {r['porcentaje_positivas']}% de reseñas positivas de {r['total_resenas']:,} ({r['calificacion']})."
+        pct = r["porcentaje_positivas"]
+        veredicto = ("muy bien valorado" if pct >= 80 else "bien valorado" if pct >= 70
+                     else "con opiniones mixtas" if pct >= 40 else "mal valorado")
+        texto = f"{nombre} está {veredicto}: {r['porcentaje_positivas']}% de reseñas positivas de {r['total_resenas']:,} ({r['calificacion']})."
+        destacadas = info.get("resenas_destacadas") or []
+        if destacadas:
+            texto += "\n\nLo que dicen los jugadores:"
+            for d in destacadas:
+                horas = f" — {d['horas']:,} h jugadas" if d.get("horas") else ""
+                texto += f"\n{'👍' if d['positiva'] else '👎'} «{d['texto']}»{horas}"
+            if all(d.get("idioma") == "english" for d in destacadas):
+                texto += "\n(No encontré reseñas en español; estas vienen en inglés.)"
+        return texto
 
     if any(w in p for w in ["jugador", "juegan", "gente", "activo"]):
         n = info.get("jugadores_ahora")
